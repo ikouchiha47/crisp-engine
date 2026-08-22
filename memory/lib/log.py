@@ -102,7 +102,7 @@ def bind(
     if project:
         # Use the last two path components so logs stay readable
         p = Path(project)
-        ctx["project"] = str(p.parent.name / p.name) if p.parent != p else p.name
+        ctx["project"] = f"{p.parent.name}/{p.name}" if p.parent != p else p.name
     ctx.setdefault("session_id", "-")
     ctx.setdefault("project", "-")
     return _ContextAdapter(logger, ctx)

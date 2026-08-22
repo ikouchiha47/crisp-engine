@@ -42,6 +42,7 @@ class MemoryHookHandler:
         self.store = store
         self.analyzer = CodeAnalyzer()
         self._embed_provider = None  # lazy: built on first episode save
+        self._watcher_registry = None  # lazy: built on first PostToolUse
 
     def _save(self, episode: MemoryEpisode) -> bool:
         """Embed then save — single call site so embed is never forgotten."""
@@ -130,36 +131,48 @@ class MemoryHookHandler:
             }
         }
 
+    def _get_watcher_registry(self):
+        if self._watcher_registry is None:
+            from lib.watchers import WatcherRegistry
+            self._watcher_registry = WatcherRegistry()
+        return self._watcher_registry
+
     def handle_claude_post_tool(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Translate PostToolUse payload → FileChange or Read handler."""
+        """Dispatch PostToolUse through WatcherRegistry; also handle Read lazily."""
         tool = data.get("tool_name", "")
-        tool_input = data.get("tool_input", {})
-        file_path = tool_input.get("file_path", "")
 
         if tool == "Read":
             return self.handle_claude_post_read(data)
 
-        if tool not in ("Write", "Edit", "MultiEdit"):
-            return {"status": "ignored", "reason": f"tool {tool} not tracked"}
+        tool_input = data.get("tool_input", {})
+        tool_output = data.get("tool_response", data.get("tool_output", {})) or {}
+        if isinstance(tool_output, str):
+            tool_output = {"stdout": tool_output}
 
-        if not file_path:
-            return {"status": "ignored", "reason": "no file_path"}
+        session_id = data.get("session_id", "unknown")
+        project_root = data.get("cwd", "") or data.get("project_root", "")
 
-        if not is_source_extension(Path(file_path).suffix):
-            return {"status": "ignored", "reason": "extension not tracked"}
+        # Mark code_index stale for file edits (still needed for index freshness)
+        file_path = tool_input.get("file_path", "")
+        if tool in ("Write", "Edit", "MultiEdit") and file_path:
+            self._mark_index_stale(file_path)
 
-        diff = self._git_diff(file_path)
-        change_type = "create" if tool == "Write" else "edit"
+        registry = self._get_watcher_registry()
+        result = registry.run(
+            tool_name=tool,
+            inp=tool_input,
+            out=tool_output,
+            session_id=session_id,
+            project_root=project_root,
+            save_fn=self._save,
+        )
 
-        # Mark existing code_index entries for this file as stale
-        self._mark_index_stale(file_path)
+        if not result["watchers_matched"]:
+            return {"status": "ignored", "reason": f"no watcher matched tool={tool}"}
 
-        return self.handle_file_change({
-            "session_id": data.get("session_id", "unknown"),
-            "file_path": file_path,
-            "change_type": change_type,
-            "diff": diff,
-        })
+        result["status"] = "ok"
+        result["tool"] = tool
+        return result
 
     def _is_indexed_fresh(self, file_path_str: str) -> bool:
         """True if file already has a non-stale code-index episode."""
