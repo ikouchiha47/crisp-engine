@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .store import MemoryStore
+from .memory_store import MemoryStore
 
 
 class ProjectMemoryManager:
@@ -158,12 +158,19 @@ class ProjectMemoryManager:
         """Create/update project metadata file."""
         project_dir.mkdir(parents=True, exist_ok=True)
         meta_file = project_dir / "project.json"
-        
-        if meta_file.exists():
+
+        is_new = not meta_file.exists()
+        if is_new:
+            from lib.log import get_logger
+            get_logger("store").info(
+                "new project registered: %s → %s",
+                project_root, project_dir.name,
+                extra={"session_id": "-", "project": str(project_root)},
+            )
+            meta = {}
+        else:
             with open(meta_file) as f:
                 meta = json.load(f)
-        else:
-            meta = {}
         
         meta.update({
             "project_id": project_dir.name,

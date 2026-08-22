@@ -2,23 +2,23 @@
 """CLI tool for memory inspection and management.
 
 Usage:
-    huh save <content>              Save explicit memory
-    huh search <query>              Search memory
-    huh show <id>                   Show episode details
-    huh forget <id>                 Delete episode
-    huh stats                       Show statistics
-    huh reflect                     Run consolidation
-    huh prune                       Run pruning
-    huh export                      Export to JSON
-    huh list [--layer=L]            List episodes
-    huh index <file> [--json]       Structural index of a file
-    huh save-index                  Save semantic index entry (file/dir/module/feature/project)
-    huh search-path <path>          Find existing index entries for a file/dir
-    huh status <path>               Show indexed/stale/pending for files under path
-    huh checkpoint                  Save session midpoint snapshot with git diff
-    huh changelog                   Save a changelog entry
-    huh projects                    List all projects
-    huh switch <project_id>         Switch to project's memory
+    crisp save <content>              Save explicit memory
+    crisp search <query>              Search memory
+    crisp show <id>                   Show episode details
+    crisp forget <id>                 Delete episode
+    crisp stats                       Show statistics
+    crisp reflect                     Run consolidation
+    crisp prune                       Run pruning
+    crisp export                      Export to JSON
+    crisp list [--layer=L]            List episodes
+    crisp index <file> [--json]       Structural index of a file
+    crisp save-index                  Save semantic index entry (file/dir/module/feature/project)
+    crisp search-path <path>          Find existing index entries for a file/dir
+    crisp status <path>               Show indexed/stale/pending for files under path
+    crisp checkpoint                  Save session midpoint snapshot with git diff
+    crisp changelog                   Save a changelog entry
+    crisp projects                    List all projects
+    crisp switch <project_id>         Switch to project's memory
 """
 import argparse
 import json
@@ -29,11 +29,19 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.project_memory import ProjectMemoryManager, get_memory_store
-from lib.store import MemoryEpisode, MemoryStore
-from lib.reflector import MemoryReflector
-from lib.prune import PruningService
+from lib.store import (
+    MemoryEpisode,
+    MemoryStore,
+    ProjectMemoryManager,
+    get_memory_store,
+    is_code_index_category,
+)
+from lib.consolidate import MemoryReflector, PruningService
 from lib.retrieve import RetrievalOrchestrator
+from lib import config as _cfg
+from lib.log import get_logger as _get_logger, log_path as _log_path
+
+_log = _get_logger("cli")
 
 
 def get_store(project_root: str = None):
@@ -74,11 +82,12 @@ def cmd_save(args):
 def cmd_search(args):
     """Search memory (default: keyword/structured; --semantic: embeddings)."""
     store = get_store()
+    emb_cfg = getattr(args, "_embedding_config", None)
     if getattr(args, "semantic", False):
-        return _semantic_search(store, args.query, args.limit)
+        return _semantic_search(store, args.query, args.limit, emb_cfg)
     from lib.retrieve import RetrievalOrchestrator
 
-    orchestrator = RetrievalOrchestrator(store)
+    orchestrator = RetrievalOrchestrator(store, emb_cfg)
     results = orchestrator.search(args.query, limit=args.limit)
 
     if not results:
@@ -274,7 +283,7 @@ def cmd_export(args):
         / ".claude"
         / "memory"
         / "exports"
-        / f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        / f"export_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -314,7 +323,7 @@ def cmd_index(args):
     if args.json:
         # Extract imports via tree-sitter
         try:
-            from lib.ts_parser import parse_imports
+            from lib.code_index.treesitter_strategy import parse_imports
             raw_imports = parse_imports(file_path)
         except Exception:
             raw_imports = []
@@ -338,6 +347,20 @@ def cmd_index(args):
                 seen[path]["names"] = list(set(seen[path].get("names", []) + imp.get("names", [])))
         imports = list(seen.values())
 
+        # Language detection is separate from symbol extraction (the indexer
+        # already extracted symbols above regardless) — this is purely the
+        # signal for whether a caller should improve indexing quality later.
+        # When it can't be determined at all, the message travels WITH the
+        # tool result so any agent consuming this output (Claude, OpenCode,
+        # whatever) has the concrete next step right where it noticed the
+        # gap, instead of needing a separately-maintained skill instruction
+        # telling it to check proactively.
+        from lib.lang_detect import detect_language
+        store = get_store()
+        detected_language = detect_language(
+            str(file_path), cache_dir=store.cache_path
+        )
+
         out = {
             "file": str(file_path),
             "media_type": result.media_type,
@@ -346,7 +369,14 @@ def cmd_index(args):
             "hierarchy": result.hierarchy,
             "metadata": result.metadata,
             "imports": imports,
+            "detected_language": detected_language,
         }
+        if detected_language is None:
+            out["message"] = (
+                f"Could not determine the language of {file_path.name} from its "
+                "extension or content heuristics. If you can tell what it is, run: "
+                f"crisp classify-language {file_path} <language>"
+            )
         print(json.dumps(out, indent=2))
         return
 
@@ -375,7 +405,22 @@ def cmd_index(args):
                 print(f"  [{ep_data.get('importance', 0):.1f}] {ep_data.get('title', '')}")
 
 
-# Index level → (huh layer, importance)
+def cmd_classify_language(args):
+    """Record a language classification an agent (or human) figured out
+    for a file Crisp Engine's own detection (languages.yml + heuristics.yml)
+    could not resolve. Writes into the per-project cache so every future lookup
+    of this file (--scope path, default) or every file sharing its
+    extension (--scope ext) resolves statically from then on.
+    """
+    from lib.lang_detect import classify_language
+
+    file_path = Path(args.file_path).resolve()
+    store = get_store()
+    classify_language(store.cache_path, str(file_path), args.language, scope=args.scope)
+    print(f"Classified {file_path.name} as {args.language} (scope={args.scope})")
+
+
+# Index level → (crisp layer, importance)
 _INDEX_LEVELS = {
     "symbol":  (0, 0.5),
     "file":    (0, 0.7),
@@ -390,7 +435,7 @@ def cmd_save_index(args):
     """Save a semantic index entry generated by Claude.
 
     Levels: symbol | file | dir | module | feature | project
-    Higher levels map to higher huh layers (file→L0, dir/module→L1, feature/project→L2).
+    Higher levels map to higher crisp layers (file→L0, dir/module→L1, feature/project→L2).
     """
     level = args.level
     if level not in _INDEX_LEVELS:
@@ -407,12 +452,12 @@ def cmd_save_index(args):
     episode_id = f"idx_{level}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{name}"
 
     # If updating an existing entry for this path+level, delete the stale one first
-    # Never delete permanent episodes — they require explicit `huh forget --force`
+    # Never delete permanent episodes — they require explicit `crisp forget --force`
     if source_path:
         existing = _find_index_episodes(store, source_path, level)
         for ep in existing:
             if ep.is_permanent:
-                print(f"⚠ Skipping permanent episode {ep.id} — use `huh forget {ep.id} --force` to remove it first")
+                print(f"⚠ Skipping permanent episode {ep.id} — use `crisp forget {ep.id} --force` to remove it first")
                 return
             store.delete_episode(ep.id)
 
@@ -446,7 +491,7 @@ def cmd_search_path(args):
     matches = [
         ep for ep in episodes
         if ep.source_path and (ep.source_path == target or ep.source_path.startswith(target))
-        and ep.category.startswith("code_index")
+        and is_code_index_category(ep.category)
         and (not level_filter or f"code_index_{level_filter}" == ep.category)
     ]
 
@@ -480,7 +525,7 @@ def cmd_status(args):
     # Build lookup: source_path → episode list
     indexed: dict = {}
     for ep in all_episodes:
-        if ep.source_path and ep.category.startswith("code_index"):
+        if ep.source_path and is_code_index_category(ep.category):
             indexed.setdefault(ep.source_path, []).append(ep)
 
     # Walk files under root (max depth from args)
@@ -694,7 +739,7 @@ def cmd_tree(args):
     if show_status:
         store = get_store()
         for ep in store.list_episodes():
-            if ep.source_path and ep.category.startswith("code_index"):
+            if ep.source_path and is_code_index_category(ep.category):
                 stale = "stale" in (ep.tags or [])
                 cur = indexed_paths.get(ep.source_path, "pending")
                 if cur != "stale":
@@ -778,17 +823,16 @@ def cmd_switch(args):
     print()
 
 
-def _semantic_search(store, query, limit):
+def _semantic_search(store, query, limit, embedding_config: dict = None):
     """USER-TRIGGERED embedding search.
 
-    Storage is deferred (no vector index yet): vectors are computed on the fly via
-    the configured provider (mock by default). Real semantic results require
-    embedding_provider=ollama in config. Falls back to keyword search on failure.
+    embedding_config overrides store.config for provider/model/url/dim — CLI flags
+    and env vars are already merged in before this is called.
     """
     from lib.embeddings import get_provider, cosine
 
-    provider = get_provider(store.config)
-    is_mock = type(provider).__name__ == "MockEmbeddingProvider"
+    merged = {**store.config, **(embedding_config or {})}
+    provider = get_provider(merged)
     try:
         qv = provider.embed(query)
     except Exception as e:
@@ -804,22 +848,121 @@ def _semantic_search(store, query, limit):
             scored.append((ep, cosine(qv, provider.embed(text))))
         except Exception as e:
             print(f"Embedding failed ({e}); falling back to keyword search.", file=sys.stderr)
-            from lib.retrieve import RetrievalOrchestrator
-
-            for ep2, score in RetrievalOrchestrator(store).search(query, limit=limit):
+            for ep2, score in RetrievalOrchestrator(store, merged).search(query, limit=limit):
                 print(f"[{ep2.layer}] {score:.2f}  {ep2.id}  {ep2.title}")
             return
     scored.sort(key=lambda t: t[1], reverse=True)
 
-    if is_mock:
-        print("⚠ embedding_provider=mock — results are NOT semantically meaningful.", file=sys.stderr)
-        print("  Set embedding_provider=ollama (+ model/url) in config to enable real search.", file=sys.stderr)
-    print(f"\nSemantic results ({len(scored[:limit])}):\n")
+    pname = type(provider).__name__
+    print(f"\nSemantic results via {pname} ({len(scored[:limit])}):\n")
     for ep, score in scored[:limit]:
         print(f"--- [{ep.layer}] cos {score:.3f} ---")
         print(f"ID: {ep.id}")
         print(f"Title: {ep.title}")
         print(f"{ep.content[:200]}{'...' if len(ep.content) > 200 else ''}\n")
+
+
+def cmd_config(args):
+    """Get or set persistent Crisp config."""
+    import os
+    action = getattr(args, "cfg_action", None)
+    if action == "get" or action is None:
+        merged = _cfg.load(cwd=os.getcwd())
+        emb_keys = ["embedding_provider", "embedding_model", "embedding_api_url", "embedding_dim",
+                    "store_backend", "db_path"]
+        print(f"Global config : {_cfg.GLOBAL_CONFIG_PATH}")
+        print(f"Project config: {os.getcwd()}/.crisp.json\n")
+        print("Merged embedding/store config:")
+        for k in emb_keys:
+            print(f"  {k} = {merged.get(k, '(unset)')}")
+        return
+    if action == "set":
+        updates = {}
+        for pair in args.pairs:
+            if "=" not in pair:
+                print(f"Skipping malformed pair (expected KEY=VALUE): {pair!r}", file=sys.stderr)
+                continue
+            k, _, v = pair.partition("=")
+            updates[k.strip()] = v.strip()
+        if not updates:
+            print("Nothing to set.", file=sys.stderr)
+            return
+        if args.global_scope:
+            _cfg.write_global(updates)
+            print(f"Written to {_cfg.GLOBAL_CONFIG_PATH}")
+        else:
+            import os
+            _cfg.write_project(os.getcwd(), updates)
+            print(f"Written to {os.getcwd()}/.crisp.json")
+        for k, v in updates.items():
+            print(f"  {k} = {v}")
+        return
+    print("Usage: crisp config [get | set KEY=VALUE ...]", file=sys.stderr)
+
+
+def cmd_logs(args):
+    """Show or tail the Crisp Engine log file."""
+    lp = _log_path()
+    if not lp.exists():
+        print(f"Log file not yet created: {lp}")
+        print("It will appear after the first hook fires or CLI command runs.")
+        return
+    if args.tail:
+        import subprocess
+        n = str(args.lines)
+        try:
+            subprocess.run(["tail", f"-{n}", "-f", str(lp)])
+        except KeyboardInterrupt:
+            pass
+    elif args.last:
+        lines = lp.read_text(encoding="utf-8").splitlines()
+        for line in lines[-args.lines:]:
+            print(line)
+    else:
+        print(lp)
+
+
+def cmd_reindex_vecs(args):
+    """Rebuild the sqlite-vec sidecar from all .md episodes in the store.
+
+    Reads every episode, embeds title+content, and upserts into vec_sidecar.db.
+    Use after: changing embedding model, first-time setup, or after manual .md edits.
+    """
+    import os
+    store = get_store()
+    embedding_cfg = getattr(args, "_embedding_config", None) or _cfg.load(cwd=os.getcwd())
+
+    try:
+        from lib.embeddings import get_provider
+        provider = get_provider(embedding_cfg)
+    except (ImportError, ValueError) as e:
+        print(f"Cannot load embedding provider: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    episodes = store.list_episodes()
+    total = len(episodes)
+    if total == 0:
+        print("No episodes found.")
+        return
+
+    sidecar = store._get_vec()
+    ok = 0
+    skipped = 0
+    for i, ep in enumerate(episodes, 1):
+        try:
+            text = f"{ep.title}\n{ep.content}"
+            vec = provider.embed(text)
+            sidecar.upsert(ep.id, vec)
+            ok += 1
+        except Exception as exc:
+            skipped += 1
+            if args.verbose:
+                print(f"  skip {ep.id}: {exc}", file=sys.stderr)
+        if i % 50 == 0 or i == total:
+            print(f"\r  {i}/{total} embedded ({ok} ok, {skipped} skipped)", end="", flush=True)
+
+    print(f"\nDone. {ok} episodes indexed, {skipped} skipped.")
+    print(f"Vec sidecar now holds {sidecar.count()} entries.")
 
 
 def cmd_observe(args):
@@ -899,11 +1042,29 @@ def cmd_instinct(args):
         print("✓ promoted to global" if ie.promote(args.id)
               else "Not enough distinct projects to promote yet.")
     else:
-        print("Usage: huh instinct <list|analyze|show|reinforce|weaken|forget|evolve|promote>")
+        print("Usage: crisp instinct <list|analyze|show|reinforce|weaken|forget|evolve|promote>")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Memory management CLI")
+
+    # ── Global embedding flags (override env vars / config files) ─────────────
+    _eg = parser.add_argument_group(
+        "embedding",
+        "Override embedding provider for this invocation. "
+        "Env vars: CRISP_EMBEDDING_PROVIDER, CRISP_EMBEDDING_MODEL, "
+        "CRISP_EMBEDDING_URL, CRISP_EMBEDDING_DIM. "
+        "Persistent defaults: ~/.config/crisp/config.json or .crisp.json in project root.",
+    )
+    _eg.add_argument("--embedding-provider", metavar="PROVIDER",
+                     help="huggingface | ollama | dspy | word2vec")
+    _eg.add_argument("--embedding-model", metavar="MODEL",
+                     help="e.g. qllama/bge-large-en-v1.5:latest  or  BAAI/bge-small-en-v1.5")
+    _eg.add_argument("--embedding-url", metavar="URL",
+                     help="Ollama API URL (default: http://localhost:11434/api/embeddings)")
+    _eg.add_argument("--embedding-dim", metavar="N", type=int,
+                     help="Vector dimension (inferred from model if omitted)")
+
     subparsers = parser.add_subparsers(dest="command", help="Command")
 
     # Save
@@ -962,6 +1123,18 @@ def main():
     index_parser.add_argument("--dry-run", action="store_true", help="Show what would be saved without saving")
     index_parser.add_argument("--verbose", "-v", action="store_true", help="List individual episodes")
 
+    # Classify-language
+    cl_lang_parser = subparsers.add_parser(
+        "classify-language",
+        help="Record a language classification Crisp Engine's own detection couldn't resolve",
+    )
+    cl_lang_parser.add_argument("file_path", help="Path to the file")
+    cl_lang_parser.add_argument("language", help="Language name (e.g. Rust, TOML)")
+    cl_lang_parser.add_argument(
+        "--scope", choices=["path", "ext"], default="path",
+        help="path=only this file, ext=every file with this extension (default: path)",
+    )
+
     # Save-index
     si_parser = subparsers.add_parser("save-index", help="Save a semantic index entry (Claude-generated)")
     si_parser.add_argument("--path", required=True, help="File or directory path this entry describes")
@@ -1003,12 +1176,33 @@ def main():
     tree_parser.add_argument("--no-status", action="store_true", help="Omit index status markers")
     tree_parser.add_argument("--untracked", action="store_true", help="Include untracked (non-ignored) files")
 
+    # Config
+    cfg_parser = subparsers.add_parser("config", help="Get/set persistent embedding/store config")
+    cfg_sub = cfg_parser.add_subparsers(dest="cfg_action")
+    cfg_get = cfg_sub.add_parser("get", help="Show current merged config")
+    cfg_set = cfg_sub.add_parser("set", help="Persist key=value pairs")
+    cfg_set.add_argument("pairs", nargs="+", metavar="KEY=VALUE",
+                         help="e.g. embedding_provider=ollama embedding_model=qllama/bge-large-en-v1.5:latest")
+    cfg_set.add_argument("--global", dest="global_scope", action="store_true",
+                         help="Write to ~/.config/crisp/config.json (default: .crisp.json in cwd)")
+
     # Projects
     subparsers.add_parser("projects", help="List all projects")
 
     # Switch
     switch_parser = subparsers.add_parser("switch", help="Switch to project memory")
     switch_parser.add_argument("project_id", help="Project ID")
+
+    # Logs
+    logs_parser = subparsers.add_parser("logs", help="Show or tail the Crisp Engine log file")
+    logs_group = logs_parser.add_mutually_exclusive_group()
+    logs_group.add_argument("--tail", "-f", action="store_true", help="Follow log in real-time (like tail -f)")
+    logs_group.add_argument("--last", action="store_true", help="Print the last N lines")
+    logs_parser.add_argument("--lines", "-n", type=int, default=50, help="Number of lines (default: 50)")
+
+    # Reindex vecs
+    rv_parser = subparsers.add_parser("reindex-vecs", help="Rebuild sqlite-vec sidecar from all stored episodes")
+    rv_parser.add_argument("--verbose", "-v", action="store_true", help="Print skipped episodes")
 
     # Observe (internal: hooks pipe a tool-use event as JSON on stdin)
     obs_parser = subparsers.add_parser("observe", help="(internal) ingest a tool-use event from stdin")
@@ -1045,6 +1239,15 @@ def main():
         parser.print_help()
         return
 
+    # Build merged embedding config: global file → .crisp.json → env vars → CLI flags
+    _cli_overrides = {
+        "embedding_provider": getattr(args, "embedding_provider", None),
+        "embedding_model":    getattr(args, "embedding_model", None),
+        "embedding_api_url":  getattr(args, "embedding_url", None),
+        "embedding_dim":      getattr(args, "embedding_dim", None),
+    }
+    args._embedding_config = _cfg.load(overrides=_cli_overrides)
+
     commands = {
         "save": cmd_save,
         "search": cmd_search,
@@ -1056,21 +1259,28 @@ def main():
         "prune": cmd_prune,
         "export": cmd_export,
         "index": cmd_index,
+        "classify-language": cmd_classify_language,
         "save-index": cmd_save_index,
         "search-path": cmd_search_path,
         "status": cmd_status,
         "checkpoint": cmd_checkpoint,
         "changelog": cmd_changelog,
         "tree": cmd_tree,
+        "config": cmd_config,
+        "logs": cmd_logs,
+        "reindex-vecs": cmd_reindex_vecs,
         "projects": cmd_projects,
         "switch": cmd_switch,
         "observe": cmd_observe,
         "instinct": cmd_instinct,
     }
 
+    _log.info("cmd=%s", args.command, extra={"session_id": "-", "project": "-"})
+
     try:
         commands[args.command](args)
     except Exception as e:
+        _log.error("cmd=%s failed: %s", args.command, e, extra={"session_id": "-", "project": "-"})
         print(f"Error: {e}", file=sys.stderr)
         import traceback
 

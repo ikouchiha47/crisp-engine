@@ -26,6 +26,7 @@ cross-project **instincts** graduate (see below).
 
 | Hook | Fires when | What gets stored |
 |---|---|---|
+| `SessionStart` | Session begins | Eager, whole-repo structural index (bounded to 500 files/run; resumes across sessions since already-indexed files are skipped) → L0 |
 | `PreToolUse` / `PostToolUse` | Any tool runs | A tool-use **observation** (instinct engine); PostToolUse also lazily indexes edited/read files → L0 |
 | `Stop` | Claude finishes a turn | Distills observations into instincts; corrections/frustration → L0 |
 | `PreCompact` | Context window fills | Last conversation turns → L0, then full cascade |
@@ -44,7 +45,7 @@ signature is seen in ≥2 projects. See `../skills/memory/instincts.md`.
 
 ### Semantic search (opt-in)
 
-`huh search` is keyword/structured by default. `huh search --semantic` uses
+`crisp search` is keyword/structured by default. `crisp search --semantic` uses
 embeddings — **user-triggered only**, never on the automatic path. The provider is
 configurable (`embedding_provider`: `mock` default, or `ollama` with a configurable
 model + API route). A persistent vector index (sqlite) is on the roadmap; today the
@@ -63,9 +64,8 @@ This installs three commands into `~/.local/bin/`:
 
 | Command | Maps to | Purpose |
 |---|---|---|
-| `huh` | `lib.cli:main` | CLI — search, reflect, stats, prune, `instinct …` |
+| `crisp` | `lib.cli:main` | CLI — search, reflect, stats, prune, `instinct …` |
 | `crisp-hook` | `lib.hooks:main` | hook entry point wired into `.claude/settings.json` |
-| `crisp-sense` | `lib.crisp_sense:main` | standalone file analyser |
 
 For **fish**, ensure `~/.local/bin` is on PATH: `fish_add_path ~/.local/bin`.
 
@@ -96,16 +96,16 @@ After editing settings, open `/hooks` once (or restart) so Claude Code reloads t
 ## CLI usage
 
 ```bash
-huh stats                       # layer counts, cache size
-huh search "JWT validation"     # keyword search; add --semantic for embeddings
-huh reflect                     # manually trigger L0→L1→L2→L3 cascade
-huh prune                       # remove decayed episodes
-huh save "note" --permanent     # save a permanent note
-huh instinct list               # learned behaviors for this project
-huh instinct evolve             # emit a skill from high-confidence instincts
+crisp stats                       # layer counts, cache size
+crisp search "JWT validation"     # keyword search; add --semantic for embeddings
+crisp reflect                     # manually trigger L0→L1→L2→L3 cascade
+crisp prune                       # remove decayed episodes
+crisp save "note" --permanent     # save a permanent note
+crisp instinct list               # learned behaviors for this project
+crisp instinct evolve             # emit a skill from high-confidence instincts
 ```
 
-In Claude Code the skill is **`/memory`** (subcommands route to the `huh` CLI).
+In Claude Code the skill is **`/memory`** (subcommands route to the `crisp` CLI).
 
 ---
 
@@ -137,23 +137,62 @@ diff-friendly in git. A SQLite vector index is on the roadmap for semantic scale
 
 ## Architecture
 
+One directory per ownable concern — each can be worked on without needing to
+understand the others' internals. `(planned)` marks components that are
+designed but not yet built; everything else is real, tested code.
+
 ```
 lib/
-  hooks.py       Claude Code hook handlers + payload translation
-  store.py       IMemoryStore interface + MD FileStore (+ confidence, update_episode)
-  instincts.py   continuous-learning: observe → distill → reinforce → evolve → promote
-  embeddings.py  pluggable embedding providers (mock default, ollama optional)
-  analyzer.py    code symbol extractor (tree-sitter, regex fallback)
-  reflector.py   L0→L1→L2→L3 consolidation pipeline
-  retrieve.py    multi-layer search + graph expansion + reranking
-  prune.py       Ebbinghaus decay pruning
-  cli.py         huh CLI entry point
-  crisp_sense.py standalone file analyser
-  project_memory.py  per-project store resolution
-```
+  ingest/                  chat-history parsing/scoring, vendored from chinfer
+                            (Claude Code JSONL + OpenCode SQLite -> scored segments)
+  ingest_bridge.py           glue: ingest segments -> MemoryEpisode -> store
+  git_correlate.py           (planned) upgrade episodes with commit SHA/message;
+                              commit boundaries as consolidation triggers
 
-The `IMemoryStore` interface makes the storage backend swappable — a `SQLiteStore`
-(and a vector index) can be dropped in without changing anything else.
+  store/
+    episode.py                MemoryEpisode schema + is_code_index_category
+    memory_store.py             MemoryStore: identity/dedup, atomic+tolerant JSON state
+    project_memory.py            per-project store resolution (git-root hashing)
+
+  code_index/
+    __init__.py                CodeElement (shared type) + analyze_file() orchestrator:
+                                tries treesitter -> ctags -> regex, first success wins
+    treesitter_strategy.py       tree-sitter extraction (lazy grammar loading)
+    ctags_strategy.py            (planned) universal-ctags extraction
+    regex_strategy.py            regex extraction, true last resort
+  lang_detect.py                language ID (GitHub Linguist languages.yml +
+                                 heuristics.yml, vendored) — tiered, agentic-fallback
+                                 for the genuine remainder via classify-language
+
+  indexers/                  media -> episode adapters (code/markdown/text/image/audio),
+                              IndexerRegistry picks the right one per file
+
+  consolidate/
+    reflector.py                L0->L1->L2->L3 consolidation pipeline
+    prune.py                     Ebbinghaus decay, archive/delete lifecycle
+  instincts/                  continuous-learning: observe -> distill -> reinforce ->
+                              evolve -> promote (project -> global)
+
+  retrieve/
+    episodic_search.py          multi-layer search + graph expansion + reranking
+    code_search.py               (planned) Cursor-style n-gram fast raw-code search
+    query_layer.py                (planned) unified interface, later MCP-exposed
+
+  metrics/                    (planned) recall accuracy, correction-repeat rate,
+                              indexing coverage — real evaluation, not just test counts
+
+  embeddings.py               pluggable embedding providers (mock default, ollama optional)
+  cli.py                      crisp CLI entry point
+  hooks.py                    Claude Code hook handlers + payload translation
+  mcp_server.py                (planned) exposes query/index as agent tools directly
+
+ui/                           (planned) trace/episode browser — see what got captured
+                              from commits/diffs, browse the memory layers themselves
+
+unlib/                        orphaned/undecided modules, kept but out of the main
+                              tree pending a real keep-or-delete call (see
+                              plans/PRODUCT-personas-and-feature-audit.md)
+```
 
 ---
 

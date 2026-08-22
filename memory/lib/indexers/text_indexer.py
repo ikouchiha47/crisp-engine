@@ -173,9 +173,5 @@ class TextIndexer(IMediaIndexer):
     
     @staticmethod
     def _now_iso() -> str:
-        from datetime import datetime
-        try:
-            from datetime import timezone
-            return datetime.now(timezone.utc).isoformat()
-        except ImportError:
-            return datetime.utcnow().isoformat() + "Z"
+        from lib.time_utils import now_iso
+        return now_iso()

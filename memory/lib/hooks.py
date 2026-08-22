@@ -6,6 +6,7 @@ Handles two call styles:
     FileChange, Stop, SessionEnd, ToolFailure
 
   Claude Code native — routed via sys.argv[1]:
+    claude-session-start ← SessionStart (eager whole-repo code index)
     claude-post-tool   ← PostToolUse (Write/Edit/MultiEdit)
     claude-stop        ← Stop
     claude-session-end ← SessionEnd
@@ -26,10 +27,12 @@ from typing import Any, Dict, List, Optional
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.analyzer import CodeAnalyzer
-from lib.store import MemoryEpisode, MemoryStore
+from lib.code_index import CodeAnalyzer
+from lib.store import MemoryEpisode, MemoryStore, is_code_index_category
+from lib.lang_detect import is_source_extension
+from lib.log import bind as _log_bind, get_logger as _get_logger
 
-SOURCE_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".c", ".cpp", ".h", ".ino"}
+_log = _get_logger("hooks")
 
 
 class MemoryHookHandler:
@@ -38,8 +41,94 @@ class MemoryHookHandler:
     def __init__(self, store: MemoryStore):
         self.store = store
         self.analyzer = CodeAnalyzer()
+        self._embed_provider = None  # lazy: built on first episode save
+
+    def _save(self, episode: MemoryEpisode) -> bool:
+        """Embed then save — single call site so embed is never forgotten."""
+        self._embed(episode)
+        ok = self.store.save_episode(episode)
+        _log.info(
+            "saved episode %s layer=%d cat=%s importance=%.2f embedded=%s",
+            episode.id, episode.layer, episode.category, episode.importance,
+            bool(episode.embedding),
+            extra={"session_id": episode.session_id, "project": "-"},
+        )
+        return ok
+
+    def _embed(self, episode: MemoryEpisode) -> None:
+        """Attach embedding to episode in-place before saving.
+
+        Uses the store's configured embedding_provider. Skips silently on any
+        error so a missing Ollama / uninstalled package never breaks a hook.
+        """
+        if episode.embedding:
+            return  # already embedded
+        try:
+            if self._embed_provider is None:
+                from lib.embeddings import get_provider
+                from lib import config as _cfg
+                merged = _cfg.load()
+                merged.update(self.store.config)
+                self._embed_provider = get_provider(merged)
+                _log.info(
+                    "embedding provider initialised: %s",
+                    merged.get("embedding_provider", "?"),
+                    extra={"session_id": episode.session_id, "project": "-"},
+                )
+            text = f"{episode.title}\n{episode.content}".strip()
+            if text:
+                episode.embedding = self._embed_provider.embed(text)
+        except Exception as exc:
+            _log.warning(
+                "embed failed for %s: %s", episode.id, exc,
+                extra={"session_id": episode.session_id, "project": "-"},
+            )
 
     # ── Claude Code native translators ────────────────────────────────────────
+
+    def handle_claude_pre_tool_context(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """PreToolUse — inject existing memory for the file about to be
+        touched, so the agent has it before reading/editing rather than
+        needing to actively call `huh search` itself.
+
+        Returns Claude Code's real hookSpecificOutput.additionalContext
+        shape directly (verified against the actual hook schema, not
+        guessed) — {} when there's nothing to inject, so main() can merge
+        this into the result unconditionally.
+
+        Scoped to code_element episodes only for now — chat-derived
+        (correction/instinct) episodes aren't reliably per-file yet
+        (ingest_bridge.py currently sets source_path to the project root,
+        not the specific file touched — a known, separately-tracked gap).
+        """
+        tool = data.get("tool_name", "")
+        tool_input = data.get("tool_input", {})
+        file_path = tool_input.get("file_path", "")
+
+        if tool not in ("Read", "Edit", "Write", "MultiEdit") or not file_path:
+            return {}
+
+        file_path_str = str(Path(file_path).resolve())
+        episodes = [
+            ep for ep in self.store.list_episodes()
+            if ep.source_path == file_path_str
+            and is_code_index_category(ep.category)
+            and "stale" not in (ep.tags or [])
+        ]
+        if not episodes:
+            return {}
+
+        lines = [f"crisp memory for {Path(file_path).name}:"]
+        for ep in episodes[:20]:
+            first_line = ep.content.splitlines()[0] if ep.content else ""
+            lines.append(f"- {ep.title}: {first_line}"[:200])
+
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": "\n".join(lines),
+            }
+        }
 
     def handle_claude_post_tool(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Translate PostToolUse payload → FileChange or Read handler."""
@@ -56,7 +145,7 @@ class MemoryHookHandler:
         if not file_path:
             return {"status": "ignored", "reason": "no file_path"}
 
-        if Path(file_path).suffix not in SOURCE_EXTENSIONS:
+        if not is_source_extension(Path(file_path).suffix):
             return {"status": "ignored", "reason": "extension not tracked"}
 
         diff = self._git_diff(file_path)
@@ -72,54 +161,131 @@ class MemoryHookHandler:
             "diff": diff,
         })
 
+    def _is_indexed_fresh(self, file_path_str: str) -> bool:
+        """True if file already has a non-stale code-index episode."""
+        return any(
+            ep.source_path == file_path_str
+            and is_code_index_category(ep.category)
+            and "stale" not in (ep.tags or [])
+            for ep in self.store.list_episodes()
+        )
+
+    def _index_file(self, file_path: Path, session_id: str, registry=None) -> Dict[str, Any]:
+        """Structural index of a single file: symbols only, no semantic summary.
+
+        Shared by the lazy PostToolUse(Read) path and the eager SessionStart walk
+        so there is exactly one code path that turns a file into code_index episodes.
+        """
+        if registry is None:
+            from lib.indexers import IndexerRegistry
+            registry = IndexerRegistry()
+
+        indexer = registry.get_indexer(file_path)
+        if indexer is None:
+            return {"status": "ignored", "reason": "no indexer"}
+
+        result = indexer.index(file_path)
+        episodes = indexer.extract_episodes(result)
+        saved = 0
+        for ep_data in episodes:
+            ep = MemoryEpisode(session_id=session_id, **ep_data)
+            if self._save(ep):
+                saved += 1
+
+        file_path_str = str(file_path.resolve())
+        self._ensure_dir_entries(file_path_str, session_id)
+
+        return {"status": "indexed", "file": str(file_path), "episodes": saved}
+
     def handle_claude_post_read(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """PostToolUse(Read) — lazy structural index if file not yet indexed."""
         tool_input = data.get("tool_input", {})
         file_path = tool_input.get("file_path", "")
-        if not file_path or Path(file_path).suffix not in SOURCE_EXTENSIONS:
+        if not file_path or not is_source_extension(Path(file_path).suffix):
             return {"status": "ignored", "reason": "not a source file"}
 
         file_path_str = str(Path(file_path).resolve())
-
-        # Check if already indexed and fresh (not stale)
-        existing = [
-            ep for ep in self.store.list_episodes()
-            if ep.source_path == file_path_str
-            and ep.category.startswith("code_index")
-            and "stale" not in (ep.tags or [])
-        ]
-        if existing:
+        if self._is_indexed_fresh(file_path_str):
             return {"status": "ignored", "reason": "already indexed"}
 
-        # Lazy structural index — symbols only, no semantic summary
         try:
-            from lib.indexers import IndexerRegistry
-            registry = IndexerRegistry()
-            indexer = registry.get_indexer(Path(file_path))
-            if indexer is None:
-                return {"status": "ignored", "reason": "no indexer"}
-
-            result = indexer.index(Path(file_path))
-            session_id = data.get("session_id", "unknown")
-            episodes = indexer.extract_episodes(result)
-            saved = 0
-            for ep_data in episodes:
-                ep = MemoryEpisode(session_id=session_id, **ep_data)
-                if self.store.save_episode(ep):
-                    saved += 1
-
-            # Ensure dir index entry exists (up to 3 levels from project root)
-            self._ensure_dir_entries(file_path_str, session_id)
-
-            return {"status": "indexed", "file": file_path, "episodes": saved}
+            return self._index_file(Path(file_path), data.get("session_id", "unknown"))
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    # Directories skipped during a repo-wide walk (SessionStart eager index).
+    IGNORE_DIRS = {".git", "node_modules", "android", "ios", "build", "dist",
+                   ".venv", "venv", "__pycache__", ".next", "target"}
+
+    def handle_claude_session_start(self, data: Dict[str, Any], max_files: int = 500) -> Dict[str, Any]:
+        """SessionStart — eager, whole-repo structural index.
+
+        Walks the project once so retrieval has L0 code_index episodes before
+        Claude reads anything, instead of only building them up reactively as
+        files happen to get Read/Edited during the session. Bounded by
+        max_files per invocation so a huge repo can't stall session start;
+        re-running (e.g. next session) picks up where it left off since
+        already-fresh files are skipped via _is_indexed_fresh.
+        """
+        cwd = data.get("cwd") or data.get("project_dir")
+        project_root = Path(cwd).resolve() if cwd else Path.cwd()
+        session_id = data.get("session_id", "unknown")
+
+        log = _log_bind(session_id=session_id, project=str(project_root), name="hooks")
+        log.info("SessionStart project=%s", project_root)
+
+        from lib.indexers import IndexerRegistry
+        registry = IndexerRegistry()
+
+        indexed = 0
+        skipped_fresh = 0
+        errors: List[str] = []
+        capped = False
+
+        for file_path in project_root.rglob("*"):
+            if not file_path.is_file() or not is_source_extension(file_path.suffix):
+                continue
+            if any(part in self.IGNORE_DIRS for part in file_path.parts):
+                continue
+
+            if self._is_indexed_fresh(str(file_path.resolve())):
+                skipped_fresh += 1
+                continue
+
+            if indexed >= max_files:
+                capped = True
+                break
+
+            try:
+                result = self._index_file(file_path, session_id, registry=registry)
+                if result.get("status") == "indexed":
+                    indexed += 1
+            except Exception as e:
+                errors.append(f"{file_path}: {e}")
+
+        git_result = self._ingest_git_log(project_root, session_id)
+
+        log.info(
+            "SessionStart done: indexed=%d skipped_fresh=%d errors=%d capped=%s git_commits=%d",
+            indexed, skipped_fresh, len(errors), capped,
+            git_result.get("git_commits", 0),
+        )
+
+        return {
+            "status": "ok",
+            "indexed": indexed,
+            "skipped_fresh": skipped_fresh,
+            "errors": errors[:10],
+            "error_count": len(errors),
+            "capped": capped,
+            "git_commits": git_result.get("git_commits", 0),
+        }
+
     def handle_claude_stop(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Translate Stop payload → Stop handler."""
-        # Claude Code Stop payload already has session_id and message
         return self.handle_stop({
             "session_id": data.get("session_id", "unknown"),
+            "cwd": data.get("cwd") or data.get("project_dir") or "",
             "message": data.get("message", ""),
             "tool_outputs": data.get("tool_outputs", []),
         })
@@ -132,6 +298,10 @@ class MemoryHookHandler:
         """
         session_id = data.get("session_id", "unknown")
         transcript_path = data.get("transcript_path", "")
+        cwd = data.get("cwd") or data.get("project_dir") or ""
+
+        log = _log_bind(session_id=session_id, project=cwd, name="hooks")
+        log.info("%s transcript=%s", event, transcript_path or "(none)")
 
         result: Dict[str, Any] = {"event": event, "session_id": session_id}
 
@@ -139,15 +309,23 @@ class MemoryHookHandler:
             context, turn_count = self._read_transcript(Path(transcript_path))
             if context and turn_count >= 3:
                 ep = self._conversation_episode(session_id, context, turn_count)
-                self.store.save_episode(ep)
+                self._save(ep)
                 result["conversation_episode"] = ep.id
                 result["turns_captured"] = turn_count
+                log.info("conversation episode saved: %s turns=%d", ep.id, turn_count)
 
         # Full cascade: L0→L1→L2→L3
-        from lib.reflector import MemoryReflector
+        from lib.consolidate import MemoryReflector
         reflector = MemoryReflector(self.store)
         consolidation = reflector.consolidate()
         result["consolidation"] = consolidation
+        log.info(
+            "%s cascade done: l1=%d l2=%d l3=%d",
+            event,
+            consolidation.get("l1_created", 0),
+            consolidation.get("l2_created", 0),
+            consolidation.get("l3_created", 0),
+        )
 
         return result
 
@@ -156,11 +334,14 @@ class MemoryHookHandler:
     def handle_session_end(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """Handle SessionEnd (internal format) — checkpoint + full cascade."""
         session_id = event_data.get("session_id", "unknown")
+        cwd = event_data.get("cwd", "")
+        log = _log_bind(session_id=session_id, project=cwd, name="hooks")
+        log.info("SessionEnd (internal)")
         all_episodes = self.store.list_episodes(layer=0)
         session_episodes = [ep for ep in all_episodes if ep.session_id == session_id]
         self._create_checkpoint(session_id, session_episodes)
 
-        from lib.reflector import MemoryReflector
+        from lib.consolidate import MemoryReflector
         reflector = MemoryReflector(self.store)
         consolidation = reflector.consolidate()
 
@@ -173,26 +354,30 @@ class MemoryHookHandler:
 
     def handle_stop(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """Handle Stop — detect corrections and frustration, save as L0."""
+        session_id = event_data.get("session_id", "unknown")
+        cwd = event_data.get("cwd", "")
         message = event_data.get("message", "")
         tool_outputs = event_data.get("tool_outputs", [])
+        log = _log_bind(session_id=session_id, project=cwd, name="hooks")
+        log.debug("Stop message_len=%d tool_outputs=%d", len(message), len(tool_outputs))
         result: Dict[str, Any] = {"event": "Stop"}
 
         correction = self._detect_correction(message, tool_outputs)
         if correction:
             ep = self._create_correction_episode(correction, event_data)
-            self.store.save_episode(ep)
+            self._save(ep)
             result["correction"] = {"episode_id": ep.id}
 
         frustration = self._detect_frustration(message)
         if frustration:
             ep = self._create_frustration_episode(frustration, event_data)
-            self.store.save_episode(ep)
+            self._save(ep)
             result["frustration"] = {"episode_id": ep.id}
 
         failures = self._detect_tool_failures(tool_outputs)
         for failure in failures:
             ep = self._create_failure_episode(failure, event_data)
-            self.store.save_episode(ep)
+            self._save(ep)
         if failures:
             result["failures"] = len(failures)
 
@@ -218,7 +403,7 @@ class MemoryHookHandler:
         session_id = event_data.get("session_id", "unknown")
 
         code_elements = []
-        if Path(file_path).suffix in SOURCE_EXTENSIONS:
+        if is_source_extension(Path(file_path).suffix):
             try:
                 code_elements = self.analyzer.analyze_file(file_path)
             except Exception:
@@ -253,7 +438,7 @@ class MemoryHookHandler:
             },
         )
 
-        saved = self.store.save_episode(episode)
+        saved = self._save(episode)
         self.store.set_file_state(file_path, content_hash)
         return {"event": "FileChange", "episode_id": episode_id if saved else None, "duplicate": not saved}
 
@@ -283,10 +468,135 @@ class MemoryHookHandler:
             frustration_score=0.7,
             context_snapshot={"tool_name": tool_name, "error": error},
         )
-        self.store.save_episode(episode)
+        self._save(episode)
         return {"event": "ToolFailure", "episode_id": episode_id}
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _ingest_git_log(
+        self,
+        project_root: Path,
+        session_id: str,
+        max_commits: int = 1000,
+    ) -> Dict[str, Any]:
+        """Ingest git commit history as L0 episodes (delta-only after first run).
+
+        The SHA of the most-recently-ingested commit is stored in file_states
+        under the key  git:last_sha:<project_root>  so subsequent SessionStarts
+        only fetch new commits — O(delta) not O(all).
+
+        Each commit becomes one L0 episode:
+          category : git_commit
+          title    : "<sha[:8]> <subject>"
+          content  : subject + body + stat (files changed summary)
+          lesson   : the commit subject (human-written "why")
+          tags     : ["git", "commit"] + changed file extensions
+          source_path : project_root
+        """
+        state_key = f"git:last_sha:{project_root}"
+        last_sha = self.store.get_file_state(state_key) or ""
+
+        # Build git log command — stop at last_sha if we have one
+        fmt = "%x00".join(["%H", "%s", "%b", "%ai", "%an"])
+        cmd = [
+            "git", "-C", str(project_root),
+            "log", f"--max-count={max_commits}",
+            "--stat", "--stat-width=120",
+            f"--format=COMMIT_START%n{fmt}%nCOMMIT_META_END",
+        ]
+        if last_sha:
+            cmd.append(f"{last_sha}..HEAD")
+
+        log = _log_bind(session_id=session_id, project=str(project_root), name="hooks")
+        log.info("git log ingest: last_sha=%s", last_sha[:12] if last_sha else "(all)")
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30,
+            )
+            raw = result.stdout.strip()
+        except Exception as exc:
+            log.warning("git log failed: %s", exc)
+            return {"git_commits": 0}
+
+        if not raw:
+            return {"git_commits": 0}
+
+        ingested = 0
+        newest_sha = ""
+
+        # Split on our sentinel
+        blocks = raw.split("COMMIT_START\n")
+        for block in blocks:
+            if not block.strip():
+                continue
+
+            parts = block.split("\nCOMMIT_META_END\n", 1)
+            if len(parts) < 2:
+                continue
+
+            meta_raw, stat_raw = parts
+            meta_fields = meta_raw.split("\x00")
+            if len(meta_fields) < 5:
+                continue
+
+            sha, subject, body, authored_at, author = meta_fields[:5]
+            sha = sha.strip()
+            subject = subject.strip()
+            if not sha or not subject:
+                continue
+
+            if not newest_sha:
+                newest_sha = sha
+
+            # Parse stat block for changed extensions
+            exts = set()
+            for line in stat_raw.splitlines():
+                line = line.strip()
+                if "|" in line:
+                    fname = line.split("|")[0].strip()
+                    ext = Path(fname).suffix
+                    if ext:
+                        exts.add(ext.lstrip("."))
+
+            stat_summary = stat_raw.strip()[-500:] if stat_raw.strip() else ""
+
+            content_parts = [f"## {subject}"]
+            if body.strip():
+                content_parts.append(body.strip())
+            if stat_summary:
+                content_parts.append(f"### Files changed\n```\n{stat_summary}\n```")
+
+            content = "\n\n".join(content_parts)
+            content_hash = self.store.compute_hash(content)
+
+            if self.store.get_by_content_hash(content_hash):
+                continue  # already ingested this exact commit
+
+            from lib.time_utils import now_iso
+            ep = MemoryEpisode(
+                id=f"git_{sha[:12]}",
+                session_id=session_id,
+                timestamp=authored_at or now_iso(),
+                layer=0,
+                title=f"{sha[:8]} {subject}",
+                content=content,
+                content_hash=content_hash,
+                source_type="git",
+                source_path=str(project_root),
+                category="git_commit",
+                importance=0.6,
+                lesson=subject,  # commit subject IS the lesson
+                tags=["git", "commit"] + list(exts)[:5],
+            )
+            self._save(ep)
+            ingested += 1
+
+        if newest_sha:
+            self.store.set_file_state(state_key, newest_sha)
+
+        log.info("git log ingest done: %d commits ingested newest=%s", ingested, newest_sha[:12] if newest_sha else "-")
+        return {"git_commits": ingested}
 
     def _git_diff(self, file_path: str) -> str:
         """Get git diff for a file against HEAD."""
@@ -440,11 +750,11 @@ class MemoryHookHandler:
         """Mark all code_index episodes for this file as stale."""
         file_path_str = str(Path(file_path).resolve())
         for ep in self.store.list_episodes():
-            if ep.source_path == file_path_str and ep.category.startswith("code_index"):
+            if ep.source_path == file_path_str and is_code_index_category(ep.category):
                 if "stale" not in (ep.tags or []) and not ep.is_permanent:
                     ep.tags = list(ep.tags or []) + ["stale"]
                     self.store.delete_episode(ep.id)
-                    self.store.save_episode(ep)
+                    self._save(ep)
 
     def _ensure_dir_entries(self, file_path: str, session_id: str) -> None:
         """Create placeholder dir index entries for up to 3 levels above the file.
@@ -499,7 +809,7 @@ class MemoryHookHandler:
                 importance=0.6,
                 tags=["code_index", "dir", "placeholder"],
             )
-            self.store.save_episode(ep)
+            self._save(ep)
             self.store.set_file_state(cache_key, "1")
 
     def _create_checkpoint(self, session_id: str, episodes: list):
@@ -511,7 +821,7 @@ class MemoryHookHandler:
         content = f"Session checkpoint: {session_id}\nTotal: {len(episodes)}\n\n"
         content += "\n".join(f"- {c}: {n}" for c, n in categories.items())
 
-        self.store.save_episode(MemoryEpisode(
+        self._save(MemoryEpisode(
             id=f"checkpoint_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
             session_id=session_id,
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -526,6 +836,7 @@ def main():
     """Entry point for crisp-hook command.
 
     Routing:
+      crisp-hook claude-session-start ← SessionStart (eager whole-repo code index)
       crisp-hook claude-post-tool    ← PostToolUse (Write/Edit/MultiEdit)
       crisp-hook claude-stop         ← Stop
       crisp-hook claude-session-end  ← SessionEnd
@@ -539,25 +850,20 @@ def main():
         print(json.dumps({"error": "invalid stdin"}))
         return
 
-    base_path = Path.home() / ".claude" / "memory"
-    store = MemoryStore(str(base_path))
+    from lib.store import get_memory_store
+    cwd = data.get("cwd") or data.get("project_dir")
+    try:
+        store = get_memory_store(cwd) if cwd else get_memory_store()
+    except Exception:
+        store = MemoryStore(str(Path.home() / ".claude" / "memory"))
     handler = MemoryHookHandler(store)
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     result: Dict[str, Any] = {"status": "ok"}
 
     def _instincts():
-        # Resolve the SAME per-project store the CLI uses (get_memory_store
-        # auto-detects the project root), so hook-recorded instincts are visible
-        # to `huh instinct list` run inside that project. Falls back to global.
         from lib.instincts import InstinctEngine
-        from lib.project_memory import get_memory_store
-        cwd = data.get("cwd") or data.get("project_dir")
-        try:
-            pstore = get_memory_store(cwd) if cwd else get_memory_store()
-        except Exception:
-            pstore = store
-        return InstinctEngine(pstore)
+        return InstinctEngine(store)
 
     def _observe(phase: str):
         """Record a tool-use observation. Guarded: never break the hook."""
@@ -573,9 +879,13 @@ def main():
             return None
 
     try:
-        if cmd == "claude-pre-tool":
+        if cmd == "claude-session-start":
+            result.update(handler.handle_claude_session_start(data))
+
+        elif cmd == "claude-pre-tool":
             _observe("pre")
             result["observed"] = "pre"
+            result.update(handler.handle_claude_pre_tool_context(data))
 
         elif cmd == "claude-post-tool":
             _observe("post")

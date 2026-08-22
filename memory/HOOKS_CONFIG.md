@@ -11,7 +11,8 @@ the hook-event JSON to it on **stdin**; `crisp-hook` routes by its **first argum
 
 | Invocation | Claude Code event | What it does |
 |---|---|---|
-| `crisp-hook claude-pre-tool` | `PreToolUse` | Record a tool-use observation (instinct engine) |
+| `crisp-hook claude-session-start` | `SessionStart` | Eager, whole-repo structural index (bounded, resumable across sessions) |
+| `crisp-hook claude-pre-tool` | `PreToolUse` | Record a tool-use observation (instinct engine) + inject existing memory for the file about to be Read/Edited via `additionalContext` |
 | `crisp-hook claude-post-tool` | `PostToolUse` | Record a tool-use observation + lazily index edited/read files |
 | `crisp-hook claude-stop` | `Stop` | Distill the observation buffer into instincts; correction/frustration detection |
 | `crisp-hook claude-session-end` | `SessionEnd` | Capture transcript, consolidate (L0→L1→L2→L3), prune |
@@ -33,6 +34,13 @@ latency** and can never block/deny a tool — they are pure observation.
 ```json
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$HOME/.local/bin/crisp-hook\" claude-session-start", "async": true, "timeout": 60 }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "*",
@@ -79,7 +87,7 @@ latency** and can never block/deny a tool — they are pure observation.
 }
 ```
 
-`Stop` fires after every Claude response — use it for fast async work (instinct distillation, stale-file checkpoint). `SessionEnd` and `PreCompact` run synchronously and trigger L0→L1→L2→L3 consolidation; they should not be async.
+`Stop` fires after every Claude response — use it for fast async work (instinct distillation, stale-file checkpoint). `SessionEnd` and `PreCompact` run synchronously and trigger L0→L1→L2→L3 consolidation; they should not be async. `SessionStart` is also async — the eager repo walk is bounded (500 files/run) and safe to run in the background; a mid-scan search just misses files not yet indexed this run.
 
 ### memory-session-end.sh (Stop hook)
 
@@ -93,7 +101,7 @@ staged=$(git -C "$PROJECT_DIR" diff --name-only --cached 2>/dev/null | grep -E '
 changed=$(printf '%s\n%s' "$unstaged" "$staged" | sort -u | grep -v '^$')
 if [ -n "$changed" ]; then
   file_list=$(echo "$changed" | tr '\n' ' ' | sed 's/ $//')
-  huh checkpoint --note "Session ended. Modified files may need re-indexing: $file_list" 2>/dev/null || true
+  crisp checkpoint --note "Session ended. Modified files may need re-indexing: $file_list" 2>/dev/null || true
 fi
 ```
 
@@ -129,7 +137,7 @@ echo '{"tool_name":"Bash","tool_input":{"command":"git status"},"cwd":"'"$PWD"'"
 echo '{"session_id":"t"}' | crisp-hook claude-stop
 
 # then inspect what was learned (from inside the project)
-huh instinct analyze --force && huh instinct list
+crisp instinct analyze --force && crisp instinct list
 ```
 
 ## Tuning / disabling
@@ -145,6 +153,6 @@ huh instinct analyze --force && huh instinct list
 - **Nothing recorded?** Open `/hooks` or restart so the config reloads; confirm
   `crisp-hook` is on PATH (`which crisp-hook`); pipe-test the command above.
 - **Wrong/empty project?** Instinct scope comes from the payload `cwd`; a dir with no
-  git remote is keyed by its path. Confirm with `huh instinct list` from that dir.
+  git remote is keyed by its path. Confirm with `crisp instinct list` from that dir.
 - **Duplicates / decay surprises?** Instincts live at L2 (30-day half-life), reinforced
   on recurrence; see `skills/memory/instincts.md`.

@@ -8,14 +8,14 @@ as patterns recur, and can graduate into real skills/commands/agents.
 
 1. **Observe** — `PreToolUse`/`PostToolUse` hooks log each tool call cheaply (append-only
    JSONL under `~/.claude/memory/observations/`). No LLM, no blocking.
-2. **Distill** — on `Stop`/`SessionEnd` (or `huh instinct analyze --force`), once the
+2. **Distill** — on `Stop`/`SessionEnd` (or `crisp instinct analyze --force`), once the
    buffer reaches `min_observations` (default 20), recurring signatures (e.g. `Bash:git`,
    `Edit:.go`) become instincts at confidence `base_confidence` (0.3).
 3. **Reinforce** — seeing the pattern again raises confidence (`+reinforce_step`), bumps
    access, and resets decay. Absence lets the normal L2 half-life erode it.
-4. **Evolve** — `huh instinct evolve` clusters instincts ≥ `evolve_threshold` (0.8) and
+4. **Evolve** — `crisp instinct evolve` clusters instincts ≥ `evolve_threshold` (0.8) and
    emits a `SKILL.md`/command/agent under `~/.claude/memory/evolved/`.
-5. **Promote** — `huh instinct promote <id>` graduates a project instinct to global scope
+5. **Promote** — `crisp instinct promote <id>` graduates a project instinct to global scope
    once its signature is seen in ≥ `promote_min_projects` (2) distinct projects.
 
 Instincts are stored at **layer L2** (30-day half-life) so a half-learned habit doesn't
@@ -25,18 +25,18 @@ evaporate overnight; promoted/global ones are marked permanent.
 
 | Command | Purpose |
 |---|---|
-| `huh instinct list [--scope S] [--min-confidence X]` | Show instincts ranked by confidence |
-| `huh instinct analyze [--force]` | Distill the observation buffer now |
-| `huh instinct show <id>` | Inspect one instinct (confidence, projects, context) |
-| `huh instinct reinforce <id>` / `weaken <id>` | Manually nudge confidence |
-| `huh instinct forget <id>` | Delete an instinct |
-| `huh instinct evolve [ids…] [--kind skill\|command\|agent] [--name N]` | Emit an artifact |
-| `huh instinct promote <id>` | Project → global |
+| `crisp instinct list [--scope S] [--min-confidence X]` | Show instincts ranked by confidence |
+| `crisp instinct analyze [--force]` | Distill the observation buffer now |
+| `crisp instinct show <id>` | Inspect one instinct (confidence, projects, context) |
+| `crisp instinct reinforce <id>` / `weaken <id>` | Manually nudge confidence |
+| `crisp instinct forget <id>` | Delete an instinct |
+| `crisp instinct evolve [ids…] [--kind skill\|command\|agent] [--name N]` | Emit an artifact |
+| `crisp instinct promote <id>` | Project → global |
 
 ## When to surface this to the user
 
-- They ask "what have you learned" / "what are my habits here" → `huh instinct list`.
-- A behavior is clearly stable and reusable → suggest `huh instinct evolve`.
+- They ask "what have you learned" / "what are my habits here" → `crisp instinct list`.
+- A behavior is clearly stable and reusable → suggest `crisp instinct evolve`.
 - Don't run `evolve`/`promote`/`forget` without telling the user what it will produce.
 
 ## Config (in `~/.claude/memory/config/config.json` under `instincts`)

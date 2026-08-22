@@ -7,7 +7,7 @@ Index a file at symbol + file level. Optionally create a dir-level summary if th
 ### 1. Get structure
 
 ```bash
-huh index --json <path>
+crisp index --json <path>
 ```
 
 Output is JSON: `summary`, `symbols`, `hierarchy`, `metadata`. Use it as raw material — do not copy it verbatim.
@@ -35,13 +35,13 @@ Valid `--level` values and what they represent:
 | `project` | The whole repo | L2 | Top-level architecture, major components, purpose |
 
 ```bash
-huh save-index --path <path> --level file --content "<your summary>"
+crisp save-index --path <path> --level file --content "<your summary>"
 ```
 
 ### 3. Dir-level summary (if not yet indexed)
 
 ```bash
-huh search-path <parent_dir> --limit 1
+crisp search-path <parent_dir> --limit 1
 ```
 
 If no results → write a dir-level summary:
@@ -49,7 +49,7 @@ If no results → write a dir-level summary:
 - Key files and their roles (one phrase each)
 
 ```bash
-huh save-index --path <parent_dir> --level dir --content "<your dir summary>"
+crisp save-index --path <parent_dir> --level dir --content "<your dir summary>"
 ```
 
 ### 4. Consider higher levels
@@ -57,7 +57,7 @@ huh save-index --path <parent_dir> --level dir --content "<your dir summary>"
 After indexing a file, check whether a module or feature summary should be updated:
 - If most files in a directory are now indexed, write or refresh the `module` summary for that directory.
 - If a feature spans multiple directories and its behavior changed, write a `feature`-level summary.
-- Use `huh search-path <path> --limit 10` to see what's already indexed at higher levels before writing a new one.
+- Use `crisp search-path <path> --limit 10` to see what's already indexed at higher levels before writing a new one.
 
 ### 5. Report
 

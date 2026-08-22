@@ -7,7 +7,7 @@ Before reading a large file, check whether a summary already exists in memory.
 ### 1. Check for existing index
 
 ```bash
-huh search-path <path> --limit 5
+crisp search-path <path> --limit 5
 ```
 
 ### 2. Interpret results
@@ -24,7 +24,7 @@ Tell the user whether an existing summary was found and whether it was used.
 
 ## Search-tool discipline (when grepping the store or repo yourself)
 
-The structured paths above (`huh search`, `huh search-path`) are preferred. When you
+The structured paths above (`crisp search`, `crisp search-path`) are preferred. When you
 must scan raw text yourself, use the right tool in this order — and **never assume a
 flag exists**:
 

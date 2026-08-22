@@ -1,44 +1,20 @@
-"""Tree-sitter based code analysis for extracting functions, classes, and structure."""
+"""Regex-based structure extraction — true last resort in the
+tree-sitter -> ctags -> regex fallback chain. Verbatim logic moved
+from the old analyzer.py (only the class wrapper changed) so the
+already-debugged extraction methods are not retyped/risked again."""
 
-import hashlib
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List
+
+from . import CodeElement
 
 
-@dataclass
-class CodeElement:
-    """Represents a code element (function, class, method, etc.)."""
+class RegexStrategy:
+    """Extracts CodeElements via hand-written per-language regexes."""
 
-    id: str
-    name: str
-    type: str  # function, class, method, module, variable
-    language: str
-    file_path: str
-    start_line: int
-    end_line: int
-    signature: str = ""
-    docstring: str = ""
-    body: str = ""
-    full_content: str = ""
-    complexity: int = 1
-    dependencies: List[str] = field(default_factory=list)
-    calls: List[str] = field(default_factory=list)
-    hash: str = ""
+    def __init__(self):
+        self.element_id_counter = 0
 
-    def compute_hash(self) -> str:
-        """Compute hash of the element's body."""
-        if not self.hash and self.body:
-            self.hash = hashlib.sha256(self.body.encode()).hexdigest()[:16]
-        return self.hash
-
-
-class CodeAnalyzer:
-    """Analyzes source code files to extract structure without tree-sitter fallback."""
-
-    # Language-specific patterns
     PATTERNS = {
         "python": {
             "class": re.compile(r"^\s*class\s+(\w+)(?:\s*\(([^)]*)\))?:\s*"),
@@ -59,7 +35,15 @@ class CodeAnalyzer:
             "arrow_function": re.compile(
                 r"^\s*(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\([^)]*\)\s*=>\s*{?\s*$"
             ),
-            "method": re.compile(r"^\s*(\w+)\s*\(([^)]*)\)\s*{?\s*$"),
+            # Negative lookahead excludes JS control-flow/reserved keywords —
+            # without it, `if (x) {`, `while (x) {`, `catch (e) {` etc. all
+            # match the same shape as a real method definition and get
+            # indexed as bogus functions literally named "if"/"while"/"catch".
+            "method": re.compile(
+                r"^\s*(?!(?:if|else|for|while|switch|catch|do|return|function|"
+                r"typeof|instanceof|new|delete|void|yield|await|throw|with)\b)"
+                r"(\w+)\s*\(([^)]*)\)\s*{?\s*$"
+            ),
         },
         "typescript": {
             "class": re.compile(
@@ -100,29 +84,6 @@ class CodeAnalyzer:
         },
     }
 
-    LANGUAGE_EXTENSIONS = {
-        ".py": "python",
-        ".js": "javascript",
-        ".ts": "typescript",
-        ".jsx": "javascript",
-        ".tsx": "typescript",
-        ".java": "java",
-        ".go": "go",
-        ".rs": "rust",
-        ".c": "c_cpp",
-        ".cpp": "c_cpp",
-        ".h": "c_cpp",
-        ".hpp": "c_cpp",
-    }
-
-    def __init__(self):
-        self.element_id_counter = 0
-
-    def _get_language(self, file_path: str) -> Optional[str]:
-        """Determine language from file extension."""
-        ext = Path(file_path).suffix.lower()
-        return self.LANGUAGE_EXTENSIONS.get(ext)
-
     def _next_id(self) -> str:
         """Generate unique element ID."""
         self.element_id_counter += 1
@@ -134,7 +95,6 @@ class CodeAnalyzer:
         """Extract Python code structure."""
         elements = []
         i = 0
-        current_class = None
         current_decorators = []
 
         while i < len(lines):
@@ -244,8 +204,13 @@ class CodeAnalyzer:
                 elements.append(class_elem)
                 elements.extend(class_methods)
 
-                current_class = class_name
-                i += len(body_lines)
+                # The class's own body-scan (the `j` loop above) already
+                # consumed every line belonging to this class, methods
+                # included. Advancing past body_lines' *last* line (not
+                # landing on it) is what makes the next main-loop iteration
+                # look at genuinely unprocessed code — landing on it instead
+                # re-scanned the class's final line as if unprocessed.
+                i += len(body_lines) + 1
                 current_decorators = []
                 continue
 
@@ -258,10 +223,13 @@ class CodeAnalyzer:
                 func_args = match.group(2)
                 start_line = i
 
-                # Skip if inside class (already handled)
-                if current_class:
-                    i += 1
-                    continue
+                # No "skip if inside a class" guard needed here: the class
+                # branch above already advances `i` past a class's entire
+                # body (methods included) via its own body-scan, so by the
+                # time this branch runs, `i` can only be at genuine
+                # module-level code. A persistent current_class flag here
+                # previously never got reset, silently dropping every
+                # module-level function that came after any class at all.
 
                 # Find function body
                 indent = len(line) - len(line.lstrip())
@@ -410,57 +378,8 @@ class CodeAnalyzer:
 
         return elements
 
-    def analyze_file(self, file_path: str) -> List[CodeElement]:
-        """Analyze a source file and extract all code elements."""
-        file_path = str(Path(file_path).resolve())
-        fp = Path(file_path)
-
-        # Try tree-sitter first (has its own extension mapping, wider coverage)
-        try:
-            from .ts_parser import parse_file
-            result = parse_file(fp)
-            if result is not None:
-                return result
-        except Exception:
-            pass
-
-        language = self._get_language(file_path)
-        if not language:
-            return []
-
-        # Regex fallback
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception as e:
-            print(f"Error reading {file_path}: {e}")
-            return []
-
-        lines = content.splitlines()
-
+    def extract(self, lines: List[str], file_path: str, language: str) -> List[CodeElement]:
+        """Dispatch to the python-specific or generic extractor."""
         if language == "python":
-            elements = self._extract_python_structure(lines, file_path)
-        else:
-            elements = self._extract_generic_structure(lines, file_path, language)
-
-        for elem in elements:
-            elem.compute_hash()
-
-        return elements
-
-    def analyze_directory(
-        self, directory: str, extensions: Optional[List[str]] = None
-    ) -> Dict[str, List[CodeElement]]:
-        """Analyze all source files in a directory."""
-        directory = str(Path(directory).resolve())
-        if extensions is None:
-            extensions = list(self.LANGUAGE_EXTENSIONS.keys())
-
-        results = {}
-        for ext in extensions:
-            for fp in Path(directory).rglob(f"*{ext}"):
-                elements = self.analyze_file(str(fp))
-                if elements:
-                    results[str(fp)] = elements
-
-        return results
+            return self._extract_python_structure(lines, file_path)
+        return self._extract_generic_structure(lines, file_path, language)

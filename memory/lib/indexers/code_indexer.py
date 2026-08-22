@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .indexer_common import IMediaIndexer, IndexResult, compute_file_hash, is_source_file
-from ..analyzer import CodeAnalyzer
+from ..code_index import CodeAnalyzer
 
 
 class CodeIndexer(IMediaIndexer):
@@ -251,10 +251,5 @@ class CodeIndexer(IMediaIndexer):
     
     @staticmethod
     def _now_iso() -> str:
-        """Current timestamp in ISO format."""
-        from datetime import datetime
-        try:
-            from datetime import timezone
-            return datetime.now(timezone.utc).isoformat()
-        except ImportError:
-            return datetime.utcnow().isoformat() + "Z"
+        from lib.time_utils import now_iso
+        return now_iso()

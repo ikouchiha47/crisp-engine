@@ -8,7 +8,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from .store import MemoryEpisode, MemoryStore
+from ..store import MemoryEpisode, MemoryStore
+from ..time_utils import now_utc, parse_ts
 
 
 class PruningService:
@@ -38,7 +39,7 @@ class PruningService:
             return 1.0
 
         if now is None:
-            now = datetime.now(timezone.utc)
+            now = now_utc()
 
         half_life_days = self.store.config["decay_half_life_days"].get(
             f"l{episode.layer}", 30
@@ -47,16 +48,12 @@ class PruningService:
         # Determine last accessed time
         if episode.last_accessed:
             try:
-                last_accessed = datetime.fromisoformat(
-                    episode.last_accessed.replace("Z", "+00:00")
-                )
+                last_accessed = parse_ts(episode.last_accessed)
             except:
                 last_accessed = now
         else:
             try:
-                last_accessed = datetime.fromisoformat(
-                    episode.timestamp.replace("Z", "+00:00")
-                )
+                last_accessed = parse_ts(episode.timestamp)
             except:
                 last_accessed = now
 
@@ -77,7 +74,7 @@ class PruningService:
         Returns:
             Number of episodes updated
         """
-        now = datetime.now(timezone.utc)
+        now = now_utc()
         updated = 0
 
         for layer in range(4):
@@ -222,8 +219,8 @@ class PruningService:
 
         # Newer wins
         try:
-            ts1 = datetime.fromisoformat(ep1.timestamp.replace("Z", "+00:00"))
-            ts2 = datetime.fromisoformat(ep2.timestamp.replace("Z", "+00:00"))
+            ts1 = parse_ts(ep1.timestamp)
+            ts2 = parse_ts(ep2.timestamp)
             if ts1 > ts2:
                 return ep1, ep2
             if ts2 > ts1:
@@ -269,11 +266,8 @@ class PruningService:
                     continue
 
                 if episode.decay_score < decay_threshold:
-                    # Check if has parent summary
-                    if episode.parent_id:
-                        # Has parent, safe to archive
-                        self._archive_episode(episode)
-                        result["archived"] += 1
+                    self._archive_episode(episode)
+                    result["archived"] += 1
 
         return result
 
@@ -296,7 +290,7 @@ class PruningService:
         Returns:
             Number of files deleted
         """
-        now = datetime.now(timezone.utc)
+        now = now_utc()
         deleted = 0
 
         for layer in range(4):

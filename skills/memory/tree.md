@@ -7,7 +7,7 @@ Show the project's file structure alongside what is and isn't indexed in memory.
 ### 1. Run tree
 
 ```bash
-huh tree [path]
+crisp tree [path]
 ```
 
 If no path given, use the current working directory (`.`).

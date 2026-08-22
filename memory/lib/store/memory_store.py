@@ -13,6 +13,18 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple
 import yaml
 
 
+def is_code_index_category(category: str) -> bool:
+    """True for any structural or semantic code-index episode category.
+
+    Structural (tree-sitter/regex, via IndexerRegistry.extract_episodes)
+    tags episodes "code_element"; semantic (huh save-index) and dir
+    placeholders use "code_index*". Both mean "this file/symbol is indexed"
+    for freshness/staleness/status checks — kept in one place so hooks.py and
+    cli.py can't drift into checking only one convention.
+    """
+    return category == "code_element" or category.startswith("code_index")
+
+
 @dataclass
 class MemoryEpisode:
     """A single memory episode (L0 - raw interaction)."""
@@ -192,6 +204,87 @@ class IMemoryStore(Protocol):
         ...
 
 
+class _VecSidecar:
+    """sqlite-vec sidecar for MDFileStore.
+
+    Stores embeddings in a separate SQLite DB (cache/vec_sidecar.db) so the
+    .md files remain the source of truth and the vec index is fully rebuildable.
+    Falls back silently if sqlite-vec extension is not installed.
+    """
+
+    def __init__(self, db_path: Path, dim: int):
+        import sqlite3, struct as _struct
+        self._struct = _struct
+        self._dim = dim
+        self._ok = False
+        try:
+            self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            import sqlite_vec  # type: ignore
+            self._conn.enable_load_extension(True)
+            sqlite_vec.load(self._conn)
+            self._conn.enable_load_extension(False)
+            self._conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS ep_vecs "
+                f"USING vec0(episode_id TEXT PRIMARY KEY, embedding float[{dim}])"
+            )
+            self._conn.commit()
+            self._ok = True
+        except Exception:
+            pass
+
+    def upsert(self, episode_id: str, vec: List[float]) -> None:
+        if not self._ok or not vec:
+            return
+        v = (vec + [0.0] * self._dim)[: self._dim]
+        blob = self._struct.pack(f"{self._dim}f", *v)
+        try:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO ep_vecs(episode_id, embedding) VALUES (?,?)",
+                (episode_id, blob),
+            )
+            self._conn.commit()
+        except Exception:
+            pass
+
+    def search(self, vec: List[float], limit: int) -> List[Tuple[str, float]]:
+        if not self._ok or not vec:
+            return []
+        v = (vec + [0.0] * self._dim)[: self._dim]
+        blob = self._struct.pack(f"{self._dim}f", *v)
+        try:
+            cur = self._conn.execute(
+                "SELECT episode_id, distance FROM ep_vecs "
+                "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (blob, limit),
+            )
+            rows = cur.fetchall()
+        except Exception:
+            return []
+        out = []
+        for ep_id, dist in rows:
+            sim = max(0.0, 1.0 - (dist * dist) / 2.0)
+            out.append((ep_id, sim))
+        return out
+
+    def delete(self, episode_id: str) -> None:
+        if not self._ok:
+            return
+        try:
+            self._conn.execute("DELETE FROM ep_vecs WHERE episode_id=?", (episode_id,))
+            self._conn.commit()
+        except Exception:
+            pass
+
+    def count(self) -> int:
+        if not self._ok:
+            return 0
+        try:
+            return self._conn.execute("SELECT COUNT(*) FROM ep_vecs").fetchone()[0]
+        except Exception:
+            return 0
+
+
 class MemoryStore:
     """File-based memory store using MD files with YAML frontmatter.
 
@@ -231,6 +324,16 @@ class MemoryStore:
         # Links (A-MEM graph)
         self.links = self._load_links()
 
+        # Vec sidecar — initialised after config is loaded
+        self._vec: Optional[_VecSidecar] = None
+
+    def _get_vec(self) -> "_VecSidecar":
+        """Lazy-init the vec sidecar so startup never blocks on sqlite-vec."""
+        if self._vec is None:
+            dim = int(self.config.get("embedding_dim", 1024))
+            self._vec = _VecSidecar(self.cache_path / "vec_sidecar.db", dim)
+        return self._vec
+
     def _load_config(self) -> Dict[str, Any]:
         """Load or create default config."""
         default = {
@@ -242,9 +345,9 @@ class MemoryStore:
             "delete_threshold_days": 365,
             "reflection_interval": 20,
             # Embeddings (used only by the USER-TRIGGERED `search --semantic` path).
-            # Default provider is "mock" so nothing hits the network automatically.
-            # Switch to "ollama" + set model/url to enable real semantic search.
-            "embedding_provider": "mock",  # mock | ollama
+            # Default: huggingface (BAAI/bge-small-en-v1.5, local, ~130 MB on first run).
+            # Fallback chain on failure: hf → word2vec (gensim, ~66 MB) → ImportError.
+            "embedding_provider": "ollama",  # ollama | huggingface | dspy | word2vec
             "embedding_model": "qllama/bge-large-en-v1.5:latest",
             "embedding_api_url": "http://localhost:11434/api/embeddings",
             "embedding_dim": 1024,
@@ -272,54 +375,72 @@ class MemoryStore:
         with open(self.config_file, "w") as f:
             json.dump(self.config, f, indent=2)
 
+    @staticmethod
+    def _read_json_tolerant(path: Path, default):
+        """Load a JSON state file, surviving corruption instead of crashing.
+
+        A direct open()+json.dump() write (what this used to be) is not
+        atomic: two processes writing the same file around the same time —
+        e.g. two hook invocations, or a crash mid-write — can interleave and
+        leave a file with a second JSON object's tail fused onto the first's
+        closing brace. That happened for real to this project's own
+        hashes.json during development. On corruption: try to salvage the
+        first complete JSON value (raw_decode), else fall back to `default`
+        rather than taking the whole store down on the next hook call.
+        """
+        if not path.exists():
+            return default
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(path.read_text())
+                return obj
+            except (json.JSONDecodeError, ValueError):
+                return default
+
+    @staticmethod
+    def _write_json_atomic(path: Path, data) -> None:
+        """Write JSON via temp-file + rename so a crash or a concurrent
+        writer can never observe (or produce) a half-written file — the
+        rename is atomic at the filesystem level, unlike open(path, "w").
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(data, indent=2))
+        os.replace(tmp, path)
+
     def _load_hash_cache(self) -> Dict[str, str]:
         """Load hash cache for deduplication."""
-        if self.hash_cache_file.exists():
-            with open(self.hash_cache_file) as f:
-                return json.load(f)
-        return {}
+        return self._read_json_tolerant(self.hash_cache_file, {})
 
     def _save_hash_cache(self):
         """Save hash cache."""
-        with open(self.hash_cache_file, "w") as f:
-            json.dump(self.hash_cache, f, indent=2)
+        self._write_json_atomic(self.hash_cache_file, self.hash_cache)
 
     def _load_file_states(self) -> Dict[str, str]:
         """Load file state tracking for change detection (path_hash -> content_hash)."""
-        if self.file_states_file.exists():
-            with open(self.file_states_file) as f:
-                return json.load(f)
-        return {}
+        return self._read_json_tolerant(self.file_states_file, {})
 
     def _save_file_states(self):
         """Save file state tracking."""
-        with open(self.file_states_file, "w") as f:
-            json.dump(self.file_states, f, indent=2)
+        self._write_json_atomic(self.file_states_file, self.file_states)
 
     def _load_path_index(self) -> Dict[str, Dict[str, str]]:
         """Load path index (path_hash -> {project, rel_path, original})."""
-        if self.path_index_file.exists():
-            with open(self.path_index_file) as f:
-                return json.load(f)
-        return {}
+        return self._read_json_tolerant(self.path_index_file, {})
 
     def _save_path_index(self):
         """Save path index."""
-        with open(self.path_index_file, "w") as f:
-            json.dump(self.path_index, f, indent=2)
+        self._write_json_atomic(self.path_index_file, self.path_index)
 
     def _load_links(self) -> Dict[str, List[Dict[str, Any]]]:
         """Load A-MEM graph links."""
-        if self.links_path.exists():
-            with open(self.links_path) as f:
-                return json.load(f)
-        return {}
+        return self._read_json_tolerant(self.links_path, {})
 
     def _save_links(self):
         """Save A-MEM graph links."""
-        self.links_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.links_path, "w") as f:
-            json.dump(self.links, f, indent=2)
+        self._write_json_atomic(self.links_path, self.links)
 
     @staticmethod
     def compute_hash(content: str) -> str:
@@ -396,9 +517,12 @@ class MemoryStore:
                     self._write_raw(existing)
                 return False
 
-        # File change check (if source_type=file)
+        # File change check (if source_type=file) — file_states is keyed by
+        # hashed path everywhere else (get_file_state/set_file_state/
+        # _get_episode_id_for_file); use the same key here so this lookup
+        # actually finds what those other methods wrote.
         if episode.source_type == "file" and episode.source_path:
-            last_hash = self.file_states.get(episode.source_path)
+            last_hash = self.get_file_state(episode.source_path)
             if last_hash == episode.source_hash:
                 # File unchanged - link to existing episode
                 existing_id = self._get_episode_id_for_file(episode.source_path)
@@ -410,8 +534,7 @@ class MemoryStore:
                         self._write_raw(existing)
                     return False
             # File changed - store new hash
-            self.file_states[episode.source_path] = episode.source_hash
-            self._save_file_states()
+            self.set_file_state(episode.source_path, episode.source_hash)
 
         # Actually persist
         self._write_raw(episode)
@@ -420,6 +543,10 @@ class MemoryStore:
         if episode.content:
             self.hash_cache[episode.content_hash] = episode.id
             self._save_hash_cache()
+
+        # Index embedding into vec sidecar if present
+        if episode.embedding:
+            self._get_vec().upsert(episode.id, episode.embedding)
 
         return True
 
@@ -532,8 +659,10 @@ class MemoryStore:
             if filepath.exists():
                 filepath.unlink()
                 deleted = True
-        # Remove from hash cache
-        self.hash_cache = {k: v for k, v in self.hash_cache.items() if k != episode_id}
+        # Remove from hash cache — hash_cache is {content_hash: episode_id},
+        # so a stale entry is one whose VALUE is this episode_id, not whose
+        # key happens to equal it (keys are content hashes, never episode ids).
+        self.hash_cache = {k: v for k, v in self.hash_cache.items() if v != episode_id}
         self._save_hash_cache()
         # Remove from file states if this was the only episode for that file
         # (simplified: keep file state, it will be reused)
@@ -596,10 +725,8 @@ class MemoryStore:
     def search_by_embedding(
         self, vector: List[float], limit: int
     ) -> List[Tuple[str, float]]:
-        """Search by embedding vector (placeholder - requires vector DB)."""
-        # For MDFileStore, this would require storing embeddings
-        # Returning empty for now - can be implemented with numpy
-        return []
+        """ANN search via sqlite-vec sidecar. Returns [] if sidecar unavailable."""
+        return self._get_vec().search(vector, limit)
 
     def search_by_keyword(self, query: str, limit: int) -> List[Tuple[str, float]]:
         """Search by keyword using TF-IDF on cached content."""
@@ -693,104 +820,3 @@ class MemoryStore:
         stats["links"] = sum(len(v) for v in self.links.values())
         return stats
 
-    def prune(self) -> Dict[str, Any]:
-        """Run pruning job (decay, archival, conflict resolution).
-
-        This is a simplified version - full implementation would use
-        the PruningService from the domain layer.
-        """
-        from datetime import datetime, timedelta, timezone
-
-        now = datetime.now(timezone.utc)
-        result = {"archived": 0, "deleted": 0, "decay_updated": 0}
-
-        half_life = self.config["decay_half_life_days"]
-        archive_threshold = self.config["archive_threshold_days"]
-        delete_threshold = self.config["delete_threshold_days"]
-
-        for layer in range(4):
-            layer_dir = self.layers_path / f"l{layer}"
-            if not layer_dir.exists():
-                continue
-
-            half_life_days = half_life.get(f"l{layer}", 30)
-
-            for fp in layer_dir.glob("*.md"):
-                ep = self._parse_file(fp)
-                if not ep:
-                    continue
-
-                # Skip permanent episodes
-                if ep.is_permanent:
-                    continue
-
-                # Compute decay
-                if ep.last_accessed:
-                    try:
-                        last_accessed = datetime.fromisoformat(
-                            ep.last_accessed.replace("Z", "+00:00")
-                        )
-                    except:
-                        last_accessed = datetime.now(timezone.utc)
-                else:
-                    try:
-                        last_accessed = datetime.fromisoformat(
-                            ep.timestamp.replace("Z", "+00:00")
-                        )
-                    except:
-                        last_accessed = datetime.now(timezone.utc)
-
-                days_since = (now - last_accessed).days
-                decay = 0.5 ** (days_since / half_life_days)
-
-                # Apply access boost
-                if ep.access_count > 0:
-                    decay *= min(2.0, 1.0 + 0.1 * ep.access_count)
-
-                decay = max(0.0, min(1.0, decay))
-
-                if abs(ep.decay_score - decay) > 0.01:
-                    ep.decay_score = decay
-                    self._write_raw(ep)
-                    result["decay_updated"] += 1
-
-                # Archive or delete low-score episodes (L0 only)
-                if layer == 0 and decay < 0.05:
-                    if days_since > archive_threshold:
-                        # Archive by moving to a subdirectory
-                        archive_dir = layer_dir / "archived"
-                        archive_dir.mkdir(exist_ok=True)
-                        archive_path = archive_dir / fp.name
-                        fp.rename(archive_path)
-                        result["archived"] += 1
-                    elif days_since > delete_threshold:
-                        fp.unlink()
-                        result["deleted"] += 1
-
-        # Clean up old archives — never delete permanent episodes
-        for layer in range(4):
-            archive_dir = self.layers_path / f"l{layer}" / "archived"
-            if archive_dir.exists():
-                for fp in archive_dir.glob("*.md"):
-                    try:
-                        mtime = datetime.fromtimestamp(fp.stat().st_mtime, timezone.utc)
-                        if (now - mtime).days > 365:
-                            ep = self._parse_file(fp)
-                            if ep and ep.is_permanent:
-                                continue
-                            fp.unlink()
-                    except:
-                        pass
-
-        return result
-
-    def consolidate(self, max_l0_per_batch: int = 20) -> Dict[str, Any]:
-        """Run consolidation: L0→L1, L1→L2, L2→L3.
-
-        This delegates to the MemoryReflector in the domain layer.
-        """
-        # Import here to avoid circular dependencies
-        from .reflector import MemoryReflector
-
-        reflector = MemoryReflector(self)
-        return reflector.consolidate(max_l0_per_batch=max_l0_per_batch)

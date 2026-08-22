@@ -9,10 +9,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.store import MemoryEpisode, MemoryStore
-from lib.analyzer import CodeAnalyzer
-from lib.reflector import MemoryReflector
+from lib.code_index import CodeAnalyzer
+from lib.consolidate import MemoryReflector
 from lib.retrieve import RetrievalOrchestrator
-from lib.prune import PruningService
+from lib.consolidate import PruningService
 
 
 def test_episode_creation():

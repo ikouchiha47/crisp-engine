@@ -1,14 +1,25 @@
 """Memory reflection and consolidation (L0 → L1 → L2 → L3)."""
 
-import json
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .analyzer import CodeAnalyzer
-from .store import MemoryEpisode, MemoryStore
+from ..code_index import CodeAnalyzer
+from ..store import MemoryEpisode, MemoryStore
+from ..time_utils import now_iso, parse_ts
+
+
+def _dedup(items: list) -> list:
+    """Return items with duplicates removed, preserving order."""
+    seen: set = set()
+    out = []
+    for item in items:
+        key = item.strip().lower()[:80]
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
 
 
 class MemoryReflector:
@@ -19,7 +30,14 @@ class MemoryReflector:
         self.analyzer = CodeAnalyzer()
 
     def generate_l1_summary(self, episode_ids: List[str]) -> Optional[MemoryEpisode]:
-        """Generate L1 summary from a group of L0 episodes."""
+        """Generate L1 summary from a group of L0 episodes.
+
+        Content priority for lessons (highest → lowest):
+          1. git_commit episodes  — subject line is a human-written lesson
+          2. ep.lesson field      — set by hooks on correction/frustration detection
+          3. ep.correction_delta  — what specifically changed
+          4. first sentence of ep.content — better than nothing
+        """
         episodes = []
         for eid in episode_ids:
             ep = self.store.read_episode(eid)
@@ -29,92 +47,136 @@ class MemoryReflector:
         if not episodes:
             return None
 
-        # Group by category/session
+        # Sort chronologically so date range is meaningful
+        episodes.sort(key=lambda e: parse_ts(e.timestamp))
+
         categories = defaultdict(list)
+        all_tags: set = set()
+        total_importance = 0.0
+
         for ep in episodes:
             categories[ep.category or "uncategorized"].append(ep)
+            all_tags.update(ep.tags)
+            total_importance += ep.importance
 
-        summaries = []
-        all_tags = set()
-        total_importance = 0
+        ts_start = parse_ts(episodes[0].timestamp).strftime("%Y-%m-%d")
+        ts_end   = parse_ts(episodes[-1].timestamp).strftime("%Y-%m-%d")
 
-        for category, cat_episodes in categories.items():
-            # Extract key patterns
-            lessons = [ep.lesson for ep in cat_episodes if ep.lesson]
-            corrections = [ep for ep in cat_episodes if ep.correction_applied]
-            frustrations = [ep for ep in cat_episodes if ep.frustration_score > 0.5]
+        lines = ["# Session Summary", "",
+                 f"**Episodes:** {len(episodes)}  |  "
+                 f"**Date range:** {ts_start} → {ts_end}", ""]
 
-            cat_summary = {
-                "category": category,
-                "episode_count": len(cat_episodes),
-                "common_tags": self._common_tags(cat_episodes),
-                "lessons": lessons[:5],  # Top 5
-                "corrections": len(corrections),
-                "frustrations": len(frustrations),
-            }
-            summaries.append(cat_summary)
-            all_tags.update(cat_episodes[0].tags if cat_episodes else [])
-            total_importance += sum(ep.importance for ep in cat_episodes)
-
-        # Build summary content
-        lines = ["# Session Summary", ""]
-        lines.append(f"**Generated from {len(episodes)} episodes**")
-        lines.append(
-            f"**Date range:** {episodes[0].timestamp[:10]} to {episodes[-1].timestamp[:10]}"
-        )
-        lines.append("")
-
-        for summary in summaries:
-            lines.append(f"## {summary['category'].title()}")
-            lines.append(f"- Episodes: {summary['episode_count']}")
-            if summary["lessons"]:
-                lines.append("- Key lessons:")
-                for lesson in summary["lessons"]:
-                    lines.append(f"  - {lesson}")
-            if summary["corrections"]:
-                lines.append(f"- Corrections applied: {summary['corrections']}")
-            if summary["frustrations"]:
-                lines.append(f"- Frustration events: {summary['frustrations']}")
+        # ── Git commits ────────────────────────────────────────────────────
+        commits = [ep for ep in episodes if ep.category == "git_commit"]
+        if commits:
+            lines.append("## Commits")
+            for ep in commits[:20]:
+                lines.append(f"- {ep.title}")
+            if len(commits) > 20:
+                lines.append(f"  _(+{len(commits) - 20} more)_")
             lines.append("")
 
-        # Extract code elements if any
+        # ── Corrections ────────────────────────────────────────────────────
+        corrections = [ep for ep in episodes if ep.correction_applied]
+        if corrections:
+            lines.append("## Corrections")
+            for ep in corrections[:10]:
+                delta = ep.correction_delta or ep.lesson or ep.title
+                lines.append(f"- {delta}")
+            lines.append("")
+
+        # ── Frustration signals ────────────────────────────────────────────
+        frustrations = [ep for ep in episodes if ep.frustration_score > 0.5]
+        if frustrations:
+            lines.append(f"## Friction points ({len(frustrations)})")
+            for ep in frustrations[:5]:
+                lines.append(f"- [{ep.frustration_score:.1f}] {ep.title}")
+            lines.append("")
+
+        # ── Lessons from all non-commit episodes ───────────────────────────
+        lessons = []
+        for ep in episodes:
+            if ep.category == "git_commit":
+                continue
+            lesson = (
+                ep.lesson
+                or ep.correction_delta
+                or self._first_sentence(ep.content)
+            )
+            if lesson:
+                lessons.append(lesson)
+
+        if lessons:
+            lines.append("## Lessons / observations")
+            for l in _dedup(lessons)[:10]:
+                lines.append(f"- {l}")
+            lines.append("")
+
+        # ── Code elements touched ──────────────────────────────────────────
+        seen_files: set = set()
         code_elements = []
         for ep in episodes:
-            if ep.source_type == "file" and ep.source_path:
-                elements = self.analyzer.analyze_file(ep.source_path)
-                code_elements.extend(elements)
+            if ep.source_type == "file" and ep.source_path and ep.source_path not in seen_files:
+                seen_files.add(ep.source_path)
+                try:
+                    code_elements.extend(self.analyzer.analyze_file(ep.source_path))
+                except Exception:
+                    pass
 
         if code_elements:
-            lines.append("## Code Elements Analyzed")
-            for elem in code_elements[:20]:  # Top 20
-                lines.append(
-                    f"- `{elem.signature}` ({elem.type}) in {Path(elem.file_path).name}"
-                )
+            lines.append("## Code touched")
+            for elem in code_elements[:15]:
+                lines.append(f"- `{elem.signature}` ({elem.type}) — {Path(elem.file_path).name}")
+            lines.append("")
+
+        # ── Per-category breakdown (skip git_commit, already shown) ────────
+        other_cats = {k: v for k, v in categories.items() if k != "git_commit"}
+        if other_cats:
+            lines.append("## By category")
+            for cat, eps in sorted(other_cats.items(), key=lambda x: -len(x[1])):
+                lines.append(f"- **{cat}**: {len(eps)} episodes")
             lines.append("")
 
         content = "\n".join(lines)
+        ts_now = now_iso()
 
-        # Create L1 episode
+        # Derive a meaningful title from commits or dominant category
+        if commits:
+            title_hint = commits[0].title.split(" ", 1)[1] if " " in commits[0].title else commits[0].title
+            title = f"Summary: {title_hint[:60]}"
+        else:
+            dominant = max(categories.items(), key=lambda x: len(x[1]))[0]
+            title = f"Summary: {dominant} ({ts_start})"
+
         l1 = MemoryEpisode(
-            id=f"l1_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{hash(content) & 0xFFFFFF:06x}",
+            id=f"l1_{ts_now.replace(':', '').replace('-', '')[:15]}_{hash(content) & 0xFFFFFF:06x}",
             session_id=episodes[0].session_id,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=ts_now,
             layer=1,
-            title=f"Summary: {', '.join(categories.keys())}",
+            title=title,
             content=content,
             tags=list(all_tags),
             category="summary",
             importance=min(1.0, total_importance / max(len(episodes), 1)),
-            parent_id="",
             linked_ids=episode_ids,
             context_snapshot={
                 "source_episodes": episode_ids,
                 "categories": list(categories.keys()),
+                "commit_count": len(commits),
             },
-            is_permanent=False,
         )
-
         return l1
+
+    @staticmethod
+    def _first_sentence(text: str) -> str:
+        """Extract first meaningful sentence from content, skip markdown headers."""
+        for line in text.splitlines():
+            line = line.strip().lstrip("#").strip()
+            if len(line) > 20 and not line.startswith("```"):
+                # Truncate at first sentence boundary
+                m = re.search(r"[.!?]", line)
+                return line[: m.end()].strip() if m else line[:120]
+        return ""
 
     def _common_tags(self, episodes: List[MemoryEpisode]) -> List[str]:
         """Find common tags across episodes."""
@@ -178,9 +240,9 @@ class MemoryReflector:
         content = "\n".join(lines)
 
         l2 = MemoryEpisode(
-            id=f"l2_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{hash(content) & 0xFFFFFF:06x}",
+            id=f"l2_{parse_ts(now_iso()).strftime('%Y%m%d_%H%M%S')}_{hash(content) & 0xFFFFFF:06x}",
             session_id="cluster",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=now_iso(),
             layer=2,
             title=f"Cluster: {topic}",
             content=content,
@@ -238,9 +300,9 @@ class MemoryReflector:
         content = "\n".join(lines)
 
         l3 = MemoryEpisode(
-            id=f"l3_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{hash(content) & 0xFFFFFF:06x}",
+            id=f"l3_{parse_ts(now_iso()).strftime('%Y%m%d_%H%M%S')}_{hash(content) & 0xFFFFFF:06x}",
             session_id="arc",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=now_iso(),
             layer=3,
             title=f"Arc: {arc_name}",
             content=content,

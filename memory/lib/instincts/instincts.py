@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .store import MemoryEpisode, MemoryStore
+from ..store import MemoryEpisode, MemoryStore
 
 INSTINCT_LAYER = 2  # L2 topic-cluster layer: 30-day half-life, cross-session
 

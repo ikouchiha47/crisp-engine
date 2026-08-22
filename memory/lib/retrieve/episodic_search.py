@@ -5,10 +5,11 @@ Implements storage-agnostic retrieval that works with any IMemoryStore.
 
 import math
 from collections import defaultdict
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from .store import MemoryEpisode, MemoryStore
+from ..embeddings import get_provider
+from ..store import MemoryEpisode, MemoryStore
+from ..time_utils import now_utc, parse_ts
 
 
 class RetrievalOrchestrator:
@@ -21,8 +22,18 @@ class RetrievalOrchestrator:
     score = vector_sim×0.4 + recency×0.3 + importance×0.2 + access_freq×0.1
     """
 
-    def __init__(self, store: MemoryStore):
+    def __init__(self, store: MemoryStore, config: dict = None):
         self.store = store
+        self._config = config or {}
+        self._embedding_provider = None  # built lazily on first search
+
+    def _get_embedding_provider(self):
+        if self._embedding_provider is None:
+            try:
+                self._embedding_provider = get_provider(self._config)
+            except (ImportError, ValueError):
+                self._embedding_provider = False  # sentinel: don't retry
+        return self._embedding_provider if self._embedding_provider is not False else None
 
     def search(
         self, query: str, limit: int = 50, include_layers: List[int] = None
@@ -40,30 +51,37 @@ class RetrievalOrchestrator:
         if include_layers is None:
             include_layers = [3, 2, 1, 0]
 
-        all_results = []
+        all_results: Dict[str, Tuple[MemoryEpisode, float]] = {}
 
-        # Layer 3: Life-arcs (highest level, most abstract)
-        if 3 in include_layers:
-            l3_results = self._search_layer(query, layer=3, limit=10)
-            all_results.extend(l3_results)
+        # --- Keyword path ---
+        for layer, lim in [(3, 10), (2, 15), (1, 20), (0, limit)]:
+            if layer in include_layers:
+                for ep, score in self._search_layer(query, layer=layer, limit=lim):
+                    if ep.id not in all_results or score > all_results[ep.id][1]:
+                        all_results[ep.id] = (ep, score)
 
-        # Layer 2: Topic clusters
-        if 2 in include_layers:
-            l2_results = self._search_layer(query, layer=2, limit=15)
-            all_results.extend(l2_results)
-
-        # Layer 1: Session summaries
-        if 1 in include_layers:
-            l1_results = self._search_layer(query, layer=1, limit=20)
-            all_results.extend(l1_results)
-
-        # Layer 0: Raw episodes
-        if 0 in include_layers:
-            l0_results = self._search_layer(query, layer=0, limit=limit)
-            all_results.extend(l0_results)
+        # --- Vector path (no-op when no provider available or store has no vecs) ---
+        try:
+            provider = self._get_embedding_provider()
+            if provider is None:
+                raise RuntimeError("no embedding provider")
+            query_vec = provider.embed(query)
+            vec_hits = self.store.search_by_embedding(query_vec, limit=limit)
+            for ep_id, sim in vec_hits:
+                if ep_id not in all_results:
+                    ep = self.store.get_episode(ep_id)
+                    if ep and ep.layer in include_layers:
+                        all_results[ep_id] = (ep, sim * self._layer_boost(ep.layer))
+                else:
+                    # Merge: take the higher of keyword and vector scores
+                    ep, kw_score = all_results[ep_id]
+                    merged = max(kw_score, sim * self._layer_boost(ep.layer))
+                    all_results[ep_id] = (ep, merged)
+        except Exception:
+            pass  # embedding provider unavailable — keyword-only is fine
 
         # Graph expansion: follow links from retrieved episodes
-        expanded = self._expand_via_graph(all_results, limit)
+        expanded = self._expand_via_graph(list(all_results.values()), limit)
 
         # Composite reranking
         reranked = self._composite_rerank(expanded, limit)
@@ -108,9 +126,8 @@ class RetrievalOrchestrator:
             # Follow outgoing links
             links = self.store.get_links(episode.id)
             for link in links:
-                target_id = link["target_id"]
-                link_type = link["link_type"]
-                strength = link["strength"]
+                # get_links returns (target_id, link_type, strength) tuples
+                target_id, link_type, strength = link
 
                 if strength > 0.7 and target_id not in expanded:
                     target = self.store.get_episode(target_id)
@@ -143,15 +160,11 @@ class RetrievalOrchestrator:
         Since we're using keyword search (no vector), we use the keyword score
         as the base and apply recency/importance/access boosts.
         """
-        now = datetime.now(timezone.utc)
+        now = now_utc()
         reranked = []
 
         for episode, base_score in results:
-            # Recency factor (0-1)
-            try:
-                ts = datetime.fromisoformat(episode.timestamp.replace("Z", "+00:00"))
-            except:
-                ts = now
+            ts = parse_ts(episode.timestamp)
             age_days = max(0, (now - ts).days)
             recency = math.exp(-age_days / 30)  # Half-life ~30 days
 

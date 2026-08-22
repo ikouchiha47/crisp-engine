@@ -30,7 +30,7 @@ git diff HEAD --stat
 ### 3. Save
 
 ```bash
-huh changelog --trigger <trigger> --outcome "<outcome>" --note "<full note>"
+crisp changelog --trigger <trigger> --outcome "<outcome>" --note "<full note>"
 ```
 
 Where `--note` contains the what/why/outcome in one paragraph.

@@ -1,16 +1,30 @@
 """Tree-sitter based code parser.
 
 Lazy grammar loading: grammars are imported on first use per language.
-Falls back to None if the grammar package is not installed.
+
+Primary source: `tree-sitter-language-pack` (PyPI) — one package, 371
+pre-compiled grammars, verified against this codebase's actual dependency
+resolution before adopting it (see conversation record: 12/12 of our
+previously hand-picked languages match its naming exactly, and its own
+extension->grammar bridge below matched 454 of Linguist's ~1,479
+tracked extensions on first try). This replaces the old model of one
+separate `tree-sitter-<lang>` pip package per language (13 hand-typed
+entries) — same "derive from a real, comprehensive source instead of a
+hand-maintained list" fix applied everywhere else in this codebase.
+
+GRAMMAR_REGISTRY is kept as a fallback for any grammar key NOT covered by
+the language pack but separately pip-installed the old way — falls back to
+None (regex/ctags handle it) if neither path has it.
 """
 import hashlib
 import importlib
 from pathlib import Path
 from typing import List, Optional
 
-from .analyzer import CodeElement
+from . import CodeElement
 
-# Map internal language key → (module, function, pip_package)
+# Fallback: old per-language pip package registry, only consulted if the
+# language pack (below) doesn't have the requested key.
 GRAMMAR_REGISTRY: dict[str, tuple[str, str, str]] = {
     "typescript":   ("tree_sitter_typescript", "language_typescript", "tree-sitter-typescript"),
     "tsx":          ("tree_sitter_typescript", "language_tsx",        "tree-sitter-typescript"),
@@ -27,7 +41,10 @@ GRAMMAR_REGISTRY: dict[str, tuple[str, str, str]] = {
     "swift":        ("tree_sitter_swift",      "language",            "tree-sitter-swift"),
 }
 
-# Extension → grammar key
+# Small hand-kept core (fast path, no lang_detect dependency needed for the
+# common case) — anything else is resolved dynamically via _dynamic_ext_map()
+# below, sourced from real Linguist data + the language pack's actual
+# supported-language set, not hand-typed.
 EXT_TO_GRAMMAR: dict[str, str] = {
     ".ts":   "typescript",
     ".tsx":  "tsx",
@@ -47,33 +64,97 @@ EXT_TO_GRAMMAR: dict[str, str] = {
     ".swift": "swift",
 }
 
+_dynamic_ext_map_cache: Optional[dict[str, str]] = None
+
+
+def _normalize_lang_name(name: str) -> str:
+    return name.lower().replace(" ", "").replace("#", "sharp").replace("+", "p").replace(".", "")
+
+
+def _dynamic_ext_map() -> dict[str, str]:
+    """Extension -> grammar key for every language the pack supports and
+    Linguist tracks, beyond the small hand-kept EXT_TO_GRAMMAR core above.
+    Built once, cached — real data, not a maintained list.
+    """
+    global _dynamic_ext_map_cache
+    if _dynamic_ext_map_cache is not None:
+        return _dynamic_ext_map_cache
+
+    result: dict[str, str] = {}
+    try:
+        import typing
+        from tree_sitter_language_pack import SupportedLanguage
+        pkg_langs = set(typing.get_args(SupportedLanguage))
+
+        from ..lang_detect import _load as _load_lang_data, _ext_to_langs, _lang_type
+        _load_lang_data()
+
+        for ext, lang_names in _ext_to_langs.items():
+            if ext in EXT_TO_GRAMMAR:
+                continue  # hand-kept core already covers it
+            for lname in lang_names:
+                if _lang_type.get(lname) not in ("programming", "markup"):
+                    continue
+                norm = _normalize_lang_name(lname)
+                if norm in pkg_langs:
+                    result[ext] = norm
+                    break
+    except Exception:
+        pass  # language pack or lang_detect unavailable — dynamic map just stays empty
+
+    _dynamic_ext_map_cache = result
+    return result
+
+# Tree-sitter grammar keys that diverge from analyzer.py's regex-fallback
+# language naming for the same file type — normalized so the "language"
+# field on a CodeElement is consistent regardless of which path produced it.
+_CANONICAL_LANGUAGE: dict[str, str] = {
+    "tsx": "typescript",
+    "jsx": "javascript",
+    "c": "c_cpp",
+    "cpp": "c_cpp",
+}
+
 _lang_cache: dict[str, object] = {}  # grammar_key → Language object or None sentinel
 
 
 def _load_grammar(grammar_key: str):
-    """Lazily load a grammar Language object. Returns None if not installed."""
+    """Lazily load a grammar Language object.
+
+    Tries tree-sitter-language-pack first (371 languages, one dependency),
+    falls back to the old per-package GRAMMAR_REGISTRY for anything the pack
+    doesn't have but got separately pip-installed. None if neither has it.
+    """
     if grammar_key in _lang_cache:
         return _lang_cache[grammar_key]
 
-    if grammar_key not in GRAMMAR_REGISTRY:
-        _lang_cache[grammar_key] = None
-        return None
-
-    mod_name, fn_name, _ = GRAMMAR_REGISTRY[grammar_key]
     try:
-        from tree_sitter import Language
-        mod = importlib.import_module(mod_name)
-        lang_fn = getattr(mod, fn_name)
-        language = Language(lang_fn())
+        from tree_sitter_language_pack import get_language
+        language = get_language(grammar_key)
         _lang_cache[grammar_key] = language
         return language
-    except (ImportError, AttributeError):
-        _lang_cache[grammar_key] = None
-        return None
+    except Exception:
+        pass
+
+    if grammar_key in GRAMMAR_REGISTRY:
+        mod_name, fn_name, _ = GRAMMAR_REGISTRY[grammar_key]
+        try:
+            from tree_sitter import Language
+            mod = importlib.import_module(mod_name)
+            lang_fn = getattr(mod, fn_name)
+            language = Language(lang_fn())
+            _lang_cache[grammar_key] = language
+            return language
+        except (ImportError, AttributeError):
+            pass
+
+    _lang_cache[grammar_key] = None
+    return None
 
 
 def grammar_key_for(file_path: Path) -> Optional[str]:
-    return EXT_TO_GRAMMAR.get(file_path.suffix.lower())
+    ext = file_path.suffix.lower()
+    return EXT_TO_GRAMMAR.get(ext) or _dynamic_ext_map().get(ext)
 
 
 def has_grammar(file_path: Path) -> bool:
@@ -104,6 +185,70 @@ def grammar_status() -> list[dict]:
         seen_pkgs.add(pkg)
         lang = _load_grammar(key)
         rows.append({"key": key, "pkg": pkg, "installed": lang is not None})
+    return rows
+
+
+# lib.lang_detect returns GitHub Linguist's canonical language names (e.g.
+# "Rust", "TypeScript", "C++"); GRAMMAR_REGISTRY's keys are lowercase,
+# tree-sitter-package-shaped ("rust", "typescript", "cpp"). This is the one
+# place that bridges the two vocabularies.
+LINGUIST_TO_GRAMMAR: dict[str, str] = {
+    "Python": "python",
+    "JavaScript": "javascript",
+    "TypeScript": "typescript",
+    "TSX": "tsx",
+    "Go": "go",
+    "C": "c",
+    "C++": "cpp",
+    "Rust": "rust",
+    "Java": "java",
+    "Kotlin": "kotlin",
+    "Scala": "scala",
+    "Swift": "swift",
+}
+
+
+def repo_grammar_status(languages: "set[str]") -> list[dict]:
+    """Three-state status (installed / available-not-installed / unsupported)
+    for a set of Linguist language names actually detected in a repo — the
+    nvim-treesitter-style registry: what's usable now vs. what a
+    `huh install-grammars` run would improve vs. what nothing helps.
+
+    Checks the language pack's real ~371-language set first (via name
+    normalization, not a hand-typed map), falling back to the old
+    LINGUIST_TO_GRAMMAR/GRAMMAR_REGISTRY pairing only for anything the pack
+    doesn't cover but was separately pip-installed the old way.
+    """
+    try:
+        import typing
+        from tree_sitter_language_pack import SupportedLanguage
+        pkg_langs = set(typing.get_args(SupportedLanguage))
+    except Exception:
+        pkg_langs = set()
+
+    rows = []
+    for lang_name in sorted(languages):
+        norm = _normalize_lang_name(lang_name)
+        if norm in pkg_langs:
+            installed = _load_grammar(norm) is not None
+            rows.append({
+                "language": lang_name,
+                "status": "installed" if installed else "available-not-installed",
+                "pip_package": "tree-sitter-language-pack",
+            })
+            continue
+
+        grammar_key = LINGUIST_TO_GRAMMAR.get(lang_name)
+        if grammar_key is None:
+            rows.append({"language": lang_name, "status": "unsupported", "pip_package": None})
+            continue
+        pkg = GRAMMAR_REGISTRY[grammar_key][2]
+        installed = _load_grammar(grammar_key) is not None
+        rows.append({
+            "language": lang_name,
+            "status": "installed" if installed else "available-not-installed",
+            "pip_package": pkg,
+        })
     return rows
 
 
@@ -172,11 +317,19 @@ def _make_elem(
     body_str = _src(source, body_node) if body_node else ""
     docstring = _extract_docstring_from_body(body_node, source)
 
+    # Hash the FULL body before truncating what's stored/displayed. An edit
+    # past character 2000 must still change the hash — hashing the
+    # already-truncated body (what compute_hash() would otherwise do,
+    # lazily, later) meant edits past that point were invisible to change
+    # detection: identical truncated body -> identical hash -> "unchanged".
+    import hashlib
+    full_hash = hashlib.sha256(body_str.encode()).hexdigest()[:16] if body_str else ""
+
     return CodeElement(
         id=_elem_id(file_path, name, node.start_point[0]),
         name=name,
         type=elem_type,
-        language=language,
+        language=_CANONICAL_LANGUAGE.get(language, language),
         file_path=file_path,
         start_line=node.start_point[0],
         end_line=node.end_point[0],
@@ -184,6 +337,7 @@ def _make_elem(
         docstring=docstring,
         body=body_str[:2000],
         full_content=body_str[:2000],
+        hash=full_hash,
     )
 
 
@@ -265,7 +419,9 @@ def _walk(node, source: bytes, file_path: str, language: str,
             name = _src(source, name_node) if name_node else "<anon>"
             elements.append(CodeElement(
                 id=_elem_id(file_path, name, node.start_point[0]),
-                name=name, type="class", language=language, file_path=file_path,
+                name=name, type="class",
+                language=_CANONICAL_LANGUAGE.get(language, language),
+                file_path=file_path,
                 start_line=node.start_point[0], end_line=node.end_point[0],
                 signature=f"type {name} struct",
             ))
@@ -288,7 +444,9 @@ def _walk(node, source: bytes, file_path: str, language: str,
         if name:
             elements.append(CodeElement(
                 id=_elem_id(file_path, name, node.start_point[0]),
-                name=name, type="class", language=language, file_path=file_path,
+                name=name, type="class",
+                language=_CANONICAL_LANGUAGE.get(language, language),
+                file_path=file_path,
                 start_line=node.start_point[0], end_line=node.end_point[0],
                 signature=f"class {name}",
             ))
@@ -386,6 +544,13 @@ def parse_file(file_path: Path) -> Optional[List[CodeElement]]:
     except Exception:
         return None
 
+    # NOTE: `language` here stays the raw grammar_key (tsx/jsx/c/cpp) on
+    # purpose — _walk()'s internal dispatch below checks e.g.
+    # `language == "cpp"` against tree-sitter-specific node types, and
+    # normalizing here would break that. Normalization to analyzer.py's
+    # naming (typescript/javascript/c_cpp) happens instead at each
+    # CodeElement construction site, where it only affects the field a
+    # consumer actually sees.
     language = grammar_key
     elements: List[CodeElement] = []
     _walk(tree.root_node, source, str(file_path), language, elements)
