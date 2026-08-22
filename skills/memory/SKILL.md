@@ -31,7 +31,10 @@ See [instincts.md](instincts.md). Continuous-learning behaviors distilled from t
 - `crisp instinct list` — show learned instincts by confidence.
 - `crisp instinct analyze [--force]` — distill the observation buffer now (runs automatically on Stop/SessionEnd).
 - `crisp instinct evolve [ids…]` — emit a skill/command/agent from high-confidence instincts.
+- `crisp instinct evolve --kind watcher [--name <Name>]` — observer mode: see [watcher-evolve.md](watcher-evolve.md). Reads instinct history, compares against active watchers, generates a watcher plugin if there is enough signal for an uncovered pattern.
 - `crisp instinct promote <id>` — graduate a project instinct to global (seen in ≥2 projects).
+
+**Auto-invoke trigger:** When the user asks "do we need a new watcher", "check for capture gaps", "evolve watchers", or "generate watcher from instincts" — invoke [watcher-evolve.md](watcher-evolve.md) directly without waiting for a subcommand.
 
 ### `tree [path]`
 See [tree.md](tree.md). Show project structure with index status markers.
@@ -85,4 +88,5 @@ When deciding what layer to write to or what decay to expect, see:
 ---
 
 If no subcommand matches, show: `Usage: /memory <index|changelog|search|search-path|tree|stats|reflect|prune|save|save-index|config|reindex-vecs|instinct|watchers>`.
+Skills that can auto-invoke without a subcommand: [watcher-evolve.md](watcher-evolve.md).
 Always show the raw CLI output after running any command.
