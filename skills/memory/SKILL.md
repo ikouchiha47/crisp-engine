@@ -57,6 +57,10 @@ Get or set persistent embedding/store config. Examples:
 - `crisp config set embedding_provider=ollama embedding_model=qllama/bge-large-en-v1.5:latest` — write to `.crisp.json`
 - `crisp config set embedding_provider=huggingface --global` — write to `~/.config/crisp/config.json`
 
+### `watchers [list]`
+Show active ToolWatchers — builtins and any user plugins from `~/.config/crisp/watchers/`.
+Run `crisp watchers list`. Each row shows the watcher name, which tool names it listens to, and whether it is built-in or user-loaded.
+
 ### `reindex-vecs [--verbose]`
 Rebuild the sqlite-vec sidecar (`cache/vec_sidecar.db`) from all stored episodes.
 Run after: changing embedding model, first-time setup, or adding episodes before embedding was configured.
@@ -80,5 +84,5 @@ When deciding what layer to write to or what decay to expect, see:
 
 ---
 
-If no subcommand matches, show: `Usage: /memory <index|changelog|search|search-path|tree|stats|reflect|prune|save|save-index|config|reindex-vecs|instinct>`.
+If no subcommand matches, show: `Usage: /memory <index|changelog|search|search-path|tree|stats|reflect|prune|save|save-index|config|reindex-vecs|instinct|watchers>`.
 Always show the raw CLI output after running any command.
