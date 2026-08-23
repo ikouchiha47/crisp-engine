@@ -284,10 +284,10 @@ Practical effects:
     (or fall back to Claude via subprocess if no LLM provider configured)
   - `save(store, text, signal_counts)` -- upsert via `store.save_episode()` with
     stable `id=user_model`; if episode exists with that id, delete then re-save
-  - `load(store)` -- `store.get_episode_by_id("user_model")`
+  - `load(store)` -- `store.get_episode("user_model")`
   - `should_update(store) -> bool` -- check threshold against stored signal_counts
 
-- [ ] `lib/store/memory_store.py` -- `get_episode_by_id(id)` if not present
+- [ ] `lib/store/memory_store.py` -- use `get_episode(id)` (already exists; no new method needed)
 
 ### Phase 3: Auto-trigger + CLI
 
@@ -319,7 +319,7 @@ Practical effects:
 | `lib/user_model.py` | new |
 | `lib/langdata/profanity_en.txt` | new (word list, existence detection only) |
 | `lib/hooks.py` | extend `_read_transcript`, add `_session_signal_episode`, auto-trigger in `handle_claude_transcript` |
-| `lib/store/memory_store.py` | add `get_episode_by_id` if missing |
+| `lib/store/memory_store.py` | use existing `get_episode(id)` — no changes needed |
 | `lib/cli.py` | add `user-model` subcommand |
 | `skills/memory/user-model.md` | new |
 | `skills/memory/SKILL.md` | add subcommand + trigger |

@@ -59,14 +59,18 @@ watchers, store, instincts, user_model (unchanged)
 
 | event_type | Claude Code | OpenCode | Pi |
 |---|---|---|---|
-| `session_start` | `claude-session-start` | `opencode-session-start` | `pi-session-start` |
-| `pre_tool` | `claude-pre-tool` | -- | -- |
+| `session_start` | `claude-session-start` | _(not in Hooks API)_ | `pi-session-start` |
+| `pre_tool` | `claude-pre-tool` | `opencode-pre-tool` | -- |
 | `post_tool` | `claude-post-tool` | `opencode-post-tool` | `pi-post-tool` |
-| `stop` | `claude-stop` | `opencode-stop` | `pi-stop` |
-| `session_end` | `claude-session-end` | `opencode-session-end` | `pi-session-end` |
-| `pre_compact` | `claude-pre-compact` | `opencode-pre-compact` | `pi-pre-compact` |
+| `stop` | `claude-stop` | _(not in Hooks API)_ | `pi-stop` |
+| `session_end` | `claude-session-end` | _(not in Hooks API)_ | `pi-session-end` |
+| `pre_compact` | `claude-pre-compact` | `opencode-pre-compact` ¹ | `pi-pre-compact` |
 | `file_change` | internal only | -- | -- |
 | `tool_failure` | internal only | -- | -- |
+
+¹ `opencode-pre-compact` fires via `experimental.session.compacting` — may not fire in all OpenCode versions.
+
+**OpenCode Hooks API gaps:** `session_start`, `stop`, and `session_end` have no equivalent in the `@opencode-ai/plugin` Hooks interface. Only `tool.execute.before`, `tool.execute.after`, and `experimental.session.compacting` are available. The GSD hooks mechanism (`.js` files via oh-my-opencode-slim) is a separate layer and may provide session lifecycle events through a different channel.
 
 ---
 

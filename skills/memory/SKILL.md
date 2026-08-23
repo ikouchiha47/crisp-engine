@@ -20,7 +20,7 @@ Record what changed, why it matters, and the outcome.
 
 ### `search <query>`
 Run `crisp search "<query>" --limit 20` and summarize the top results — title, layer, importance, first 2 sentences of content. This is keyword/structured retrieval (cheap, safe to run anytime).
-**Semantic (embedding) search is USER-TRIGGERED only:** run `crisp search "<query>" --semantic` *only* when the user explicitly asks for semantic/vector search. The provider defaults to `ollama` (model `qllama/bge-large-en-v1.5:latest`); override via `crisp config set` or `--embedding-provider` flag. Never use `--semantic` automatically.
+**Semantic (embedding) search is USER-TRIGGERED only:** run `crisp search "<query>" --semantic` *only* when the user explicitly asks for semantic/vector search. The provider defaults to `ollama` (model `qllama/bge-large-en-v1.5:latest`); override via `crisp config set` or `--embedding-provider` flag. On Ollama per-call failures (e.g. HTTP 500), the engine falls back automatically: `ollama → huggingface (sentence-transformers) → word2vec (gensim)`. Never use `--semantic` automatically.
 When you need to grep the raw store or repo yourself, follow the tool discipline in [search.md](search.md) (`rg` → `sed`/`awk` → `grep`, probe flags first).
 
 ### `search-path <path>`
