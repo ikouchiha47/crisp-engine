@@ -5,7 +5,10 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lib.log import get_logger
 from lib.store import MemoryEpisode
+
+_log = get_logger("watchers.git")
 
 _SKIP_CMDS = {"add", "fetch", "status", "log", "diff", "show", "ls-files", "branch", "checkout", "switch"}
 _CAPTURE_CMDS = {"commit", "push", "merge", "rebase", "reset", "stash", "tag"}
@@ -46,6 +49,9 @@ class GitWatcher:
         stderr = out.get("stderr", "") or ""
         exit_code = out.get("exit_code", 0)
 
+        _log.debug("git: sub=%s exit=%s session=%s project=%s",
+                   sub, exit_code, session_id, project_root,
+                   extra={"session_id": session_id, "project": project_root})
         dispatch = {
             "commit": self._handle_commit,
             "push": self._handle_push,
@@ -80,6 +86,8 @@ class GitWatcher:
 
         # Fall back to git log -1 if we have a project root
         if project_root and (not sha or not subject):
+            _log.debug("git commit: stdout parse incomplete (sha=%r subject=%r), falling back to git log -1", sha, subject,
+                       extra={"session_id": session_id, "project": project_root})
             try:
                 r = subprocess.run(
                     ["git", "log", "-1", "--format=%H%n%s%n%b"],
@@ -90,8 +98,14 @@ class GitWatcher:
                     sha = parts[0].strip() if len(parts) > 0 else sha
                     subject = parts[1].strip() if len(parts) > 1 else subject
                     body = parts[2].strip() if len(parts) > 2 else ""
-            except Exception:
-                pass
+                    _log.debug("git commit: fallback sha=%s subject=%r", sha[:12] if sha else "-", subject,
+                               extra={"session_id": session_id, "project": project_root})
+                else:
+                    _log.warning("git commit: git log -1 failed rc=%d stderr=%s", r.returncode, r.stderr[:200],
+                                 extra={"session_id": session_id, "project": project_root})
+            except Exception as e:
+                _log.warning("git commit: git log -1 exception: %s", e,
+                             extra={"session_id": session_id, "project": project_root})
 
         if not subject:
             subject = stdout.strip()[:120] or "git commit"

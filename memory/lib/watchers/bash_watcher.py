@@ -2,7 +2,10 @@
 
 from datetime import datetime, timezone
 
+from lib.log import get_logger
 from lib.store import MemoryEpisode
+
+_log = get_logger("watchers.bash_failure")
 
 
 def _now() -> str:
@@ -50,6 +53,9 @@ class BashWatcher:
             content += f"\nStdout:\n```\n{stdout}\n```"
 
         ep_id = f"bash_fail_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        _log.debug("bash_failure: cmd=%r exit=%d session=%s",
+                   cmd[:80], exit_code, session_id,
+                   extra={"session_id": session_id, "project": project_root})
         return [MemoryEpisode(
             id=ep_id,
             session_id=session_id,

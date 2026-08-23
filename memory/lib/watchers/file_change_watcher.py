@@ -4,8 +4,11 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lib.log import get_logger
 from lib.store import MemoryEpisode
 from lib.lang_detect import is_source_extension
+
+_log = get_logger("watchers.file_change")
 
 
 class FileChangeWatcher:
@@ -36,6 +39,8 @@ class FileChangeWatcher:
         if not file_path:
             return []
 
+        _log.debug("file_change: file=%s tool=%s session=%s", file_path, tool_name, session_id,
+                   extra={"session_id": session_id, "project": project_root})
         diff = self._git_diff(file_path, project_root)
         change_type = "create" if tool_name == "Write" else "edit"
 
@@ -59,6 +64,9 @@ class FileChangeWatcher:
         except Exception:
             content_hash = ""
 
+        _log.debug("file_change: diff_len=%d symbols=%d ep=%s",
+                   len(diff), len(code_elements), ep_id,
+                   extra={"session_id": session_id, "project": project_root})
         return [MemoryEpisode(
             id=ep_id,
             session_id=session_id,
