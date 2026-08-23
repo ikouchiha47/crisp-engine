@@ -78,7 +78,28 @@ class MemoryHookHandler:
                 )
             text = f"{episode.title}\n{episode.content}".strip()
             if text:
-                episode.embedding = self._embed_provider.embed(text)
+                try:
+                    episode.embedding = self._embed_provider.embed(text)
+                except Exception as per_call_exc:
+                    # Per-call failure (e.g. Ollama 500): fall back to HF or word2vec.
+                    _log.warning(
+                        "embed per-call failure for %s (%s), trying fallback",
+                        episode.id, per_call_exc,
+                        extra={"session_id": episode.session_id, "project": "-"},
+                    )
+                    from lib.embeddings import _hf_then_w2v
+                    from lib import config as _cfg
+                    merged = _cfg.load()
+                    merged.update(self.store.config)
+                    try:
+                        fallback = _hf_then_w2v(merged)
+                        episode.embedding = fallback.embed(text)
+                        self._embed_provider = fallback  # promote so next call uses it
+                    except Exception as fb_exc:
+                        _log.warning(
+                            "embed fallback also failed for %s: %s", episode.id, fb_exc,
+                            extra={"session_id": episode.session_id, "project": "-"},
+                        )
         except Exception as exc:
             _log.warning(
                 "embed failed for %s: %s", episode.id, exc,

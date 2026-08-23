@@ -40,7 +40,7 @@ class MemoryReflector:
         """
         episodes = []
         for eid in episode_ids:
-            ep = self.store.read_episode(eid)
+            ep = self.store.get_episode(eid)
             if ep and ep.layer == 0:
                 episodes.append(ep)
 
@@ -196,7 +196,7 @@ class MemoryReflector:
         """Generate L2 topic cluster from L1 summaries."""
         l1_summaries = []
         for sid in l1_ids:
-            ep = self.store.read_episode(sid)
+            ep = self.store.get_episode(sid)
             if ep and ep.layer == 1:
                 l1_summaries.append(ep)
 
@@ -263,7 +263,7 @@ class MemoryReflector:
         """Generate L3 life-arc from L2 clusters."""
         l2_clusters = []
         for cid in l2_ids:
-            ep = self.store.read_episode(cid)
+            ep = self.store.get_episode(cid)
             if ep and ep.layer == 2:
                 l2_clusters.append(ep)
 
