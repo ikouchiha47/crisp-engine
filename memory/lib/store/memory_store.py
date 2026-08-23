@@ -136,6 +136,10 @@ class IMemoryStore(Protocol):
         """Retrieve an episode by ID."""
         ...
 
+    def get_episode_by_id(self, episode_id: str) -> Optional[MemoryEpisode]:
+        """Retrieve an episode by stable ID across all layers."""
+        ...
+
     def list_episodes(
         self,
         layer: Optional[int] = None,
@@ -605,6 +609,10 @@ class MemoryStore:
 
     def get_episode(self, episode_id: str) -> Optional[MemoryEpisode]:
         """Read an episode by ID. Alias for read_episode."""
+        return self.read_episode(episode_id)
+
+    def get_episode_by_id(self, episode_id: str) -> Optional[MemoryEpisode]:
+        """Read an episode by stable ID across all layers."""
         return self.read_episode(episode_id)
 
     def _parse_file(self, filepath: Path) -> Optional[MemoryEpisode]:
