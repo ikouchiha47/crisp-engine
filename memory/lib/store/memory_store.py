@@ -133,11 +133,8 @@ class IMemoryStore(Protocol):
         ...
 
     def get_episode(self, episode_id: str) -> Optional[MemoryEpisode]:
-        """Retrieve an episode by ID."""
-        ...
-
-    def get_episode_by_id(self, episode_id: str) -> Optional[MemoryEpisode]:
-        """Retrieve an episode by stable ID across all layers."""
+        """Return the episode with this ID, or None. Searches all layers (L0-L3).
+        Use for stable-ID lookups. For content/metadata queries use list_episodes()."""
         ...
 
     def list_episodes(
@@ -597,8 +594,15 @@ class MemoryStore:
         content = f"---\n{fm}---\n\n{episode.content}"
         filepath.write_text(content)
 
-    def read_episode(self, episode_id: str) -> Optional[MemoryEpisode]:
-        """Read an episode by ID."""
+    def get_episode(self, episode_id: str) -> Optional[MemoryEpisode]:
+        """Return the episode with this ID, or None if it does not exist.
+
+        Searches all layers (L0-L3). Use this when you have a stable ID and
+        want the episode regardless of which layer it lives in -- e.g. fetching
+        the persistent user_model episode or looking up a correction by ID.
+
+        For searching by content or metadata, use list_episodes() with filters.
+        """
         for layer in range(4):
             filepath = self._filepath(episode_id, layer)
             if filepath.exists():
@@ -606,14 +610,6 @@ class MemoryStore:
                 if ep:
                     return ep
         return None
-
-    def get_episode(self, episode_id: str) -> Optional[MemoryEpisode]:
-        """Read an episode by ID. Alias for read_episode."""
-        return self.read_episode(episode_id)
-
-    def get_episode_by_id(self, episode_id: str) -> Optional[MemoryEpisode]:
-        """Read an episode by stable ID across all layers."""
-        return self.read_episode(episode_id)
 
     def _parse_file(self, filepath: Path) -> Optional[MemoryEpisode]:
         """Parse MD file with YAML frontmatter."""
