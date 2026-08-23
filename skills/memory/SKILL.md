@@ -19,22 +19,22 @@ Triggers: `milestone`, `finally-works`, `major-change`, `pre-compact`, `session-
 Record what changed, why it matters, and the outcome.
 
 ### `search <query>`
-Run `crisp search "<query>" --limit 20` and summarize the top results — title, layer, importance, first 2 sentences of content. This is keyword/structured retrieval (cheap, safe to run anytime).
-**Semantic (embedding) search is USER-TRIGGERED only:** run `crisp search "<query>" --semantic` *only* when the user explicitly asks for semantic/vector search. The provider defaults to `ollama` (model `qllama/bge-large-en-v1.5:latest`); override via `crisp config set` or `--embedding-provider` flag. On Ollama per-call failures (e.g. HTTP 500), the engine falls back automatically: `ollama → huggingface (sentence-transformers) → word2vec (gensim)`. Never use `--semantic` automatically.
-When you need to grep the raw store or repo yourself, follow the tool discipline in [search.md](search.md) (`rg` → `sed`/`awk` → `grep`, probe flags first).
+Run `crisp search "<query>" --limit 20` and summarize the top results - title, layer, importance, first 2 sentences of content. This is keyword/structured retrieval (cheap, safe to run anytime).
+**Semantic (embedding) search is USER-TRIGGERED only:** run `crisp search "<query>" --semantic` *only* when the user explicitly asks for semantic/vector search. The provider defaults to `ollama` (model `qllama/bge-large-en-v1.5:latest`); override via `crisp config set` or `--embedding-provider` flag. On Ollama per-call failures (e.g. HTTP 500), the engine falls back automatically: `ollama -> huggingface (sentence-transformers) -> word2vec (gensim)`. Never use `--semantic` automatically.
+When you need to grep the raw store or repo yourself, follow the tool discipline in [search.md](search.md) (`rg` -> `sed`/`awk` -> `grep`, probe flags first).
 
 ### `search-path <path>`
 See [search.md](search.md). Check if a file or directory is already indexed before reading it.
 
 ### `instinct <list|analyze|show|reinforce|weaken|forget|evolve|promote>`
 See [instincts.md](instincts.md). Continuous-learning behaviors distilled from tool-use.
-- `crisp instinct list` — show learned instincts by confidence.
-- `crisp instinct analyze [--force]` — distill the observation buffer now (runs automatically on Stop/SessionEnd).
-- `crisp instinct evolve [ids…]` — emit a skill/command/agent from high-confidence instincts.
-- `crisp instinct evolve --kind watcher [--name <Name>]` — observer mode: see [watcher-evolve.md](watcher-evolve.md). Reads instinct history, compares against active watchers, generates a watcher plugin if there is enough signal for an uncovered pattern.
-- `crisp instinct promote <id>` — graduate a project instinct to global (seen in ≥2 projects).
+- `crisp instinct list` - show learned instincts by confidence.
+- `crisp instinct analyze [--force]` - distill the observation buffer now (runs automatically on Stop/SessionEnd).
+- `crisp instinct evolve [ids…]` - emit a skill/command/agent from high-confidence instincts.
+- `crisp instinct evolve --kind watcher [--name <Name>]` - observer mode: see [watcher-evolve.md](watcher-evolve.md). Reads instinct history, compares against active watchers, generates a watcher plugin if there is enough signal for an uncovered pattern.
+- `crisp instinct promote <id>` - graduate a project instinct to global (seen in ≥2 projects).
 
-**Auto-invoke trigger:** When the user asks "do we need a new watcher", "check for capture gaps", "evolve watchers", or "generate watcher from instincts" — invoke [watcher-evolve.md](watcher-evolve.md) directly without waiting for a subcommand.
+**Auto-invoke trigger:** When the user asks "do we need a new watcher", "check for capture gaps", "evolve watchers", or "generate watcher from instincts" - invoke [watcher-evolve.md](watcher-evolve.md) directly without waiting for a subcommand.
 
 ### `tree [path]`
 See [tree.md](tree.md). Show project structure with index status markers.
@@ -56,21 +56,21 @@ Run `crisp save-index --path <path> --level <level> --content "<text>"`. Confirm
 
 ### `config [get | set KEY=VALUE …] [--global]`
 Get or set persistent embedding/store config. Examples:
-- `crisp config get` — show merged config (global + project + env)
-- `crisp config set embedding_provider=ollama embedding_model=qllama/bge-large-en-v1.5:latest` — write to `.crisp.json`
-- `crisp config set embedding_provider=huggingface --global` — write to `~/.config/crisp/config.json`
+- `crisp config get` - show merged config (global + project + env)
+- `crisp config set embedding_provider=ollama embedding_model=qllama/bge-large-en-v1.5:latest` - write to `.crisp.json`
+- `crisp config set embedding_provider=huggingface --global` - write to `~/.config/crisp/config.json`
 
 ### `watchers [list]`
-Show active ToolWatchers — builtins and any user plugins from `~/.config/crisp/watchers/`.
+Show active ToolWatchers - builtins and any user plugins from `~/.config/crisp/watchers/`.
 Run `crisp watchers list`. Each row shows the watcher name, which tool names it listens to, and whether it is built-in or user-loaded.
 
 ### `reindex-vecs [--verbose]`
 Rebuild the sqlite-vec sidecar (`cache/vec_sidecar.db`) from all stored episodes.
 Run after: changing embedding model, first-time setup, or adding episodes before embedding was configured.
-`crisp reindex-vecs` — embed all episodes and upsert into the sidecar.
+`crisp reindex-vecs` - embed all episodes and upsert into the sidecar.
 
 ### `forget <episode-id>`
-Run `crisp forget <episode-id>`. If the episode is permanent, the CLI will block with ⛔ — you must confirm with `crisp forget <id> --force`. Never pass `--force` without explicit user instruction.
+Run `crisp forget <episode-id>`. If the episode is permanent, the CLI will block with ⛔ - you must confirm with `crisp forget <id> --force`. Never pass `--force` without explicit user instruction.
 
 ### `save <text>`
 Run `crisp save "<text>" --importance 0.9 --permanent`. Confirm the episode ID saved.
@@ -80,10 +80,10 @@ Run `crisp save "<text>" --importance 0.9 --permanent`. Confirm the episode ID s
 ## Episodic layer reference
 
 When deciding what layer to write to or what decay to expect, see:
-- [l0.md](l0.md) — raw episodes, 1-day decay, automatic
-- [l1.md](l1.md) — session summaries, 1-week decay, promoted by reflect
-- [l2.md](l2.md) — topic clusters, 1-month decay, promoted by reflect
-- [l3.md](l3.md) — permanent, no decay, corrections and hard facts
+- [l0.md](l0.md) - raw episodes, 1-day decay, automatic
+- [l1.md](l1.md) - session summaries, 1-week decay, promoted by reflect
+- [l2.md](l2.md) - topic clusters, 1-month decay, promoted by reflect
+- [l3.md](l3.md) - permanent, no decay, corrections and hard facts
 
 ---
 
