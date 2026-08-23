@@ -142,8 +142,11 @@ class IMemoryStore(Protocol):
         layer: Optional[int] = None,
         category: Optional[str] = None,
         tag: Optional[str] = None,
+        session_id: Optional[str] = None,
+        since_ts: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> List[MemoryEpisode]:
-        """List episodes with optional filters."""
+        """Return episodes matching all supplied filters, newest first."""
         ...
 
     def delete_episode(self, episode_id: str) -> bool:
@@ -627,8 +630,19 @@ class MemoryStore:
         layer: Optional[int] = None,
         category: Optional[str] = None,
         tag: Optional[str] = None,
+        session_id: Optional[str] = None,
+        since_ts: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> List[MemoryEpisode]:
-        """List episodes with optional filters."""
+        """Return episodes matching all supplied filters, newest first.
+
+        layer      -- restrict to one layer (0-3); None means all layers
+        category   -- exact match on episode.category
+        tag        -- episode must contain this tag
+        session_id -- restrict to one session
+        since_ts   -- ISO 8601 UTC; only episodes with timestamp >= this value
+        limit      -- return at most this many episodes (applied after sort)
+        """
         layers = [layer] if layer is not None else range(4)
         episodes = []
         for l in layers:
@@ -637,14 +651,20 @@ class MemoryStore:
                 continue
             for fp in sorted(layer_dir.glob("*.md")):
                 ep = self._parse_file(fp)
-                if ep:
-                    if category and ep.category != category:
-                        continue
-                    if tag and tag not in ep.tags:
-                        continue
-                    episodes.append(ep)
-        # Sort by timestamp descending
+                if ep is None:
+                    continue
+                if category and ep.category != category:
+                    continue
+                if tag and tag not in ep.tags:
+                    continue
+                if session_id and ep.session_id != session_id:
+                    continue
+                if since_ts and ep.timestamp < since_ts:
+                    continue
+                episodes.append(ep)
         episodes.sort(key=lambda e: e.timestamp, reverse=True)
+        if limit is not None:
+            episodes = episodes[:limit]
         return episodes
 
     def update_access(self, episode_id: str) -> None:
