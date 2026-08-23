@@ -846,15 +846,16 @@ class MemoryHookHandler:
 
 
 def main():
-    """Entry point for crisp-hook command.
+    """Entry point for crisp-hook <event-name>.
 
-    Routing:
-      crisp-hook claude-session-start ← SessionStart (eager whole-repo code index)
-      crisp-hook claude-post-tool    ← PostToolUse (Write/Edit/MultiEdit)
-      crisp-hook claude-stop         ← Stop
-      crisp-hook claude-session-end  ← SessionEnd
-      crisp-hook claude-pre-compact  ← PreCompact
-      crisp-hook                     ← internal format (hook_event_name field)
+    Supported prefixes:
+      claude-*     Claude Code (native shell hooks)
+      opencode-*   OpenCode (via docs/agent-shims/opencode.ts)
+      pi-*         Pi (via docs/agent-shims/pi.ts)
+      (none)       Internal Crisp Engine format (hook_event_name field)
+
+    All routing is handled by lib.adapters. Adding a new agent requires
+    only a new adapter class -- nothing here changes.
     """
     try:
         raw = sys.stdin.read()
@@ -863,23 +864,28 @@ def main():
         print(json.dumps({"error": "invalid stdin"}))
         return
 
+    from lib.adapters import resolve
     from lib.store import get_memory_store
-    cwd = data.get("cwd") or data.get("project_dir")
+
     try:
-        store = get_memory_store(cwd) if cwd else get_memory_store()
+        event = resolve(sys.argv, data)
+    except ValueError as e:
+        print(json.dumps({"status": "ignored", "reason": str(e)}))
+        return
+
+    try:
+        store = get_memory_store(event.project_root) if event.project_root else get_memory_store()
     except Exception:
         store = MemoryStore(str(Path.home() / ".claude" / "memory"))
-    handler = MemoryHookHandler(store)
 
-    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    result: Dict[str, Any] = {"status": "ok"}
+    handler = MemoryHookHandler(store)
+    result: Dict[str, Any] = {"status": "ok", "agent": event.agent}
 
     def _instincts():
         from lib.instincts import InstinctEngine
         return InstinctEngine(store)
 
     def _observe(phase: str):
-        """Record a tool-use observation. Guarded: never break the hook."""
         try:
             _instincts().observe({**data, "phase": phase})
         except Exception:
@@ -892,46 +898,45 @@ def main():
             return None
 
     try:
-        if cmd == "claude-session-start":
+        et = event.event_type
+
+        if et == "session_start":
             result.update(handler.handle_claude_session_start(data))
 
-        elif cmd == "claude-pre-tool":
+        elif et == "pre_tool":
             _observe("pre")
             result["observed"] = "pre"
             result.update(handler.handle_claude_pre_tool_context(data))
 
-        elif cmd == "claude-post-tool":
+        elif et == "post_tool":
             _observe("post")
             result.update(handler.handle_claude_post_tool(data))
 
-        elif cmd == "claude-stop":
+        elif et == "stop":
             distilled = _distill()
             if distilled:
                 result["instincts"] = distilled
             result.update(handler.handle_claude_stop(data))
 
-        elif cmd == "claude-session-end":
+        elif et == "session_end":
             distilled = _distill()
             if distilled:
                 result["instincts"] = distilled
             result.update(handler.handle_claude_transcript(data, "SessionEnd"))
 
-        elif cmd == "claude-pre-compact":
+        elif et == "pre_compact":
             result.update(handler.handle_claude_transcript(data, "PreCompact"))
 
+        # Internal-only event types
+        elif et == "file_change":
+            result.update(handler.handle_file_change(data))
+
+        elif et == "tool_failure":
+            result.update(handler.handle_tool_failure(data))
+
         else:
-            # Internal Crisp Engine format
-            event = data.get("hook_event_name", "")
-            if event == "SessionEnd":
-                result.update(handler.handle_session_end(data))
-            elif event == "Stop":
-                result.update(handler.handle_stop(data))
-            elif event == "FileChange":
-                result.update(handler.handle_file_change(data))
-            elif event == "ToolFailure":
-                result.update(handler.handle_tool_failure(data))
-            else:
-                result["status"] = "ignored"
+            result["status"] = "ignored"
+            result["reason"] = f"unhandled event_type={et}"
 
     except Exception as e:
         import traceback
