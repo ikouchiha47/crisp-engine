@@ -39,12 +39,15 @@ _log = _get_logger("hooks")
 class MemoryHookHandler:
     """Handles Claude Code hook events for automatic memory capture."""
 
+    _CONV_INTERVAL = 30  # save conversation episode every N post_tool calls
+
     def __init__(self, store: MemoryStore):
         self.store = store
         self.analyzer = CodeAnalyzer()
         self._embed_provider = None  # lazy: built on first episode save
         self._watcher_registry = None  # lazy: built on first PostToolUse
         self._project_root = ""  # set on first resolved event, used by _save()
+        self._post_tool_count = 0   # incremented each PostToolUse; triggers periodic conv save
 
     def _save(self, episode: MemoryEpisode) -> bool:
         """Embed then save — single call site so embed is never forgotten."""
@@ -224,12 +227,37 @@ class MemoryHookHandler:
             save_fn=self._save,
         )
 
+        # periodic async conversation snapshot every N tool calls
+        self._post_tool_count += 1
+        if self._post_tool_count % self._CONV_INTERVAL == 0:
+            transcript_path = data.get("transcript_path", "")
+            if transcript_path:
+                self._async_conv_snapshot(session_id, transcript_path)
+
         if not result["watchers_matched"]:
             return {"status": "ignored", "reason": f"no watcher matched tool={tool}"}
 
         result["status"] = "ok"
         result["tool"] = tool
         return result
+
+    def _async_conv_snapshot(self, session_id: str, transcript_path: str) -> None:
+        """Save a conversation episode in a background thread — never blocks the hook."""
+        import threading
+        def _run():
+            try:
+                path = Path(transcript_path)
+                if not path.exists():
+                    return
+                context, turn_count = self._read_transcript(path)
+                if context and turn_count >= 3:
+                    ep = self._conversation_episode(session_id, context, turn_count)
+                    self._save(ep)
+                    _log.info("periodic conv snapshot saved: %s turns=%d", ep.id, turn_count,
+                              extra={"session_id": session_id, "project": self._project_root})
+            except Exception as exc:
+                _log.debug("periodic conv snapshot failed: %s", exc)
+        threading.Thread(target=_run, daemon=True, name="crisp-conv-snapshot").start()
 
     def _is_indexed_fresh(self, file_path_str: str) -> bool:
         """True if file already has a non-stale code-index episode."""
