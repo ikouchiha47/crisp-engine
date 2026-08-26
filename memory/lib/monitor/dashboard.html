@@ -32,7 +32,7 @@
 
 html, body { height: 100%; background: var(--bg); color: var(--ink); font-family: var(--mono); font-size: 12px; overflow: hidden; }
 
-.shell { display: grid; grid-template-rows: auto auto auto 1fr; height: 100vh; }
+.shell { display: grid; grid-template-rows: auto auto auto auto 1fr; height: 100vh; }
 
 /* ── Top bar ── */
 .topbar {
@@ -208,6 +208,55 @@ html, body { height: 100%; background: var(--bg); color: var(--ink); font-family
 /* search match highlight */
 mark { background: #ffe066; color: var(--ink); border-radius: 1px; padding: 0 1px; }
 
+/* ── View switcher ── */
+.viewbar { display: flex; border-bottom: 1px solid var(--ink); background: var(--bg-panel); }
+.view-btn { padding: 0 20px; height: 32px; border: none; border-right: 1px solid var(--rule); background: transparent; font-family: var(--cond); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; cursor: pointer; color: var(--muted); }
+.view-btn.active { background: var(--ink); color: var(--bg); }
+.view-btn:hover:not(.active) { background: var(--bg-row); color: var(--ink); }
+
+/* ── Memory browser ── */
+#mem-view { display: none; overflow: hidden; }
+#mem-view.active { display: grid; grid-template-columns: 200px 1fr 320px; }
+.mem-projects { border-right: 1px solid var(--ink); overflow-y: auto; background: var(--bg-panel); }
+.mem-proj-row { padding: 8px 14px; border-bottom: 1px solid var(--rule); cursor: pointer; }
+.mem-proj-row:hover { background: var(--bg-row); }
+.mem-proj-row.active { border-left: 2px solid var(--hook); padding-left: 12px; }
+.mem-proj-name { font-family: var(--cond); font-weight: 700; font-size: 12px; }
+.mem-proj-stats { font-size: 9px; color: var(--muted); margin-top: 2px; display: flex; gap: 6px; }
+.mem-lbadge { font-family: var(--cond); font-size: 9px; font-weight: 700; padding: 1px 4px; border: 1px solid currentColor; }
+.mem-lbadge.l0 { color: var(--hook); } .mem-lbadge.l1 { color: var(--ref); } .mem-lbadge.l2 { color: var(--saved); } .mem-lbadge.l3 { color: var(--match); }
+
+.mem-list-col { display: flex; flex-direction: column; overflow: hidden; }
+.mem-layer-bar { display: flex; border-bottom: 1px solid var(--rule); background: var(--bg-panel); flex-shrink: 0; }
+.mem-layer-btn { padding: 0 14px; height: 30px; border: none; border-right: 1px solid var(--rule); background: transparent; font-family: var(--cond); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; cursor: pointer; color: var(--muted); }
+.mem-layer-btn.active { color: var(--bg-panel); }
+.mem-layer-btn.l-all.active { background: var(--ink); }
+.mem-layer-btn.l-0.active  { background: var(--hook); }
+.mem-layer-btn.l-1.active  { background: var(--ref); }
+.mem-layer-btn.l-2.active  { background: var(--saved); }
+.mem-layer-btn.l-3.active  { background: var(--match); }
+.mem-ep-list { flex: 1; overflow-y: auto; }
+.mem-ep-list::-webkit-scrollbar { width: 3px; }
+.mem-ep-list::-webkit-scrollbar-thumb { background: var(--dim); }
+.mem-ep-row { display: flex; align-items: baseline; gap: 0; padding: 5px 0; border-bottom: 1px solid var(--rule); border-left: 3px solid transparent; cursor: pointer; }
+.mem-ep-row:hover { background: var(--bg-row); }
+.mem-ep-row.active { background: #f0f4ff; }
+.mem-ep-row.l0 { border-left-color: var(--hook); } .mem-ep-row.l1 { border-left-color: var(--ref); } .mem-ep-row.l2 { border-left-color: var(--saved); } .mem-ep-row.l3 { border-left-color: var(--match); }
+.mem-ep-layer { width: 28px; flex-shrink: 0; text-align: center; font-family: var(--cond); font-size: 10px; font-weight: 700; color: var(--muted); }
+.mem-ep-cat { font-family: var(--cond); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .02em; width: 120px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mem-ep-cat.conversation { color: var(--hook); } .mem-ep-cat.git_commit,.mem-ep-cat.git_push { color: var(--match); } .mem-ep-cat.summary { color: var(--ref); } .mem-ep-cat.instinct { color: var(--saved); } .mem-ep-cat.arc { color: var(--embok); } .mem-ep-cat.code_element,.mem-ep-cat.code { color: var(--muted); } .mem-ep-cat.documentation { color: var(--ink); }
+.mem-ep-id { font-size: 10px; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 10px; }
+.mem-ep-imp { font-size: 9px; width: 36px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+.mem-detail-col { border-left: 1px solid var(--ink); display: flex; flex-direction: column; overflow: hidden; background: var(--bg-panel); }
+.mem-detail-head { border-bottom: 1px solid var(--rule); padding: 8px 14px; flex-shrink: 0; }
+.mem-detail-id { font-family: var(--cond); font-weight: 700; font-size: 12px; word-break: break-all; }
+.mem-detail-meta { margin-top: 4px; display: flex; gap: 10px; font-size: 9px; color: var(--muted); flex-wrap: wrap; }
+.mem-detail-body { flex: 1; overflow-y: auto; padding: 12px 14px; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: var(--ink); }
+.mem-detail-body::-webkit-scrollbar { width: 3px; }
+.mem-detail-body::-webkit-scrollbar-thumb { background: var(--dim); }
+.mem-empty { padding: 24px 14px; font-size: 11px; color: var(--muted); font-family: var(--cond); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+
 /* ── Scroll-to-bottom FAB ── */
 #scroll-fab {
   position: fixed; bottom: 20px; right: 232px;
@@ -294,8 +343,14 @@ mark { background: #ffe066; color: var(--ink); border-radius: 1px; padding: 0 1p
     </div>
   </div>
 
+  <!-- View switcher -->
+  <div class="viewbar">
+    <button class="view-btn active" id="vb-live" onclick="switchView('live')">Live Feed</button>
+    <button class="view-btn" id="vb-mem" onclick="switchView('memory')">Memory Store</button>
+  </div>
+
   <!-- Filter bar -->
-  <div class="filterbar">
+  <div class="filterbar" id="filterbar">
     <input class="filter-search" id="search" type="text" placeholder="filter events...  e.g. GitWatcher, embed_fail, huh">
 
     <div class="time-range-group">
@@ -344,6 +399,33 @@ mark { background: #ffe066; color: var(--ink); border-radius: 1px; padding: 0 1p
     </div>
 
   </div>
+
+  <!-- Memory browser view (hidden by default) -->
+  <div id="mem-view">
+    <div class="mem-projects" id="mem-projects">
+      <div class="mem-empty">Loading...</div>
+    </div>
+    <div class="mem-list-col">
+      <div class="mem-layer-bar">
+        <button class="mem-layer-btn l-all active" onclick="memSetLayer(null,this)">All</button>
+        <button class="mem-layer-btn l-0" onclick="memSetLayer(0,this)">L0 raw</button>
+        <button class="mem-layer-btn l-1" onclick="memSetLayer(1,this)">L1 summary</button>
+        <button class="mem-layer-btn l-2" onclick="memSetLayer(2,this)">L2 instinct</button>
+        <button class="mem-layer-btn l-3" onclick="memSetLayer(3,this)">L3 arc</button>
+      </div>
+      <div class="mem-ep-list" id="mem-ep-list">
+        <div class="mem-empty">Select a project</div>
+      </div>
+    </div>
+    <div class="mem-detail-col">
+      <div class="mem-detail-head" id="mem-detail-head">
+        <div class="mem-detail-id" id="mem-detail-id">—</div>
+        <div class="mem-detail-meta" id="mem-detail-meta"></div>
+      </div>
+      <div class="mem-detail-body" id="mem-detail-body">Select an episode to read its full content.</div>
+    </div>
+  </div>
+
 </div>
 
 <button id="scroll-fab" title="Jump to latest">&#8595;</button>
@@ -606,6 +688,7 @@ function addRow(e, p) {
   document.getElementById('feed').insertBefore(row, document.getElementById('no-results'));
   applyFilter(row);
   updateFilterCount();
+  autoScroll();
 }
 
 function fmtTs(iso) {
@@ -703,6 +786,89 @@ fab.addEventListener('click', function() {
   feedEl.scrollTop = feedEl.scrollHeight;
   fab.classList.remove('visible');
 });
+
+// ── View switching ────────────────────────────────────────────────────────
+function switchView(view) {
+  const liveBody = document.querySelector('.body');
+  const memView  = document.getElementById('mem-view');
+  const filterbar = document.getElementById('filterbar');
+  document.getElementById('vb-live').classList.toggle('active', view === 'live');
+  document.getElementById('vb-mem').classList.toggle('active', view === 'memory');
+  liveBody.style.display  = view === 'live'   ? '' : 'none';
+  filterbar.style.display = view === 'live'   ? '' : 'none';
+  memView.classList.toggle('active', view === 'memory');
+  if (view === 'memory') memLoadProjects();
+}
+
+// ── Memory browser ────────────────────────────────────────────────────────
+let memActiveProjId = null;
+let memActiveLayer  = null;
+
+async function memLoadProjects() {
+  try {
+    const res = await fetch('/api/projects');
+    const list = await res.json();
+    const el = document.getElementById('mem-projects');
+    el.innerHTML = '';
+    list.forEach(p => {
+      const row = document.createElement('div');
+      row.className = 'mem-proj-row';
+      row.dataset.projId = p.proj_id;
+      const layers = Object.entries(p.layers).map(([l,n]) =>
+        `<span class="mem-lbadge ${l}">${l.toUpperCase()} ${n}</span>`).join(' ');
+      row.innerHTML = `<div class="mem-proj-name">${esc(p.name)}</div><div class="mem-proj-stats">${layers}</div>`;
+      row.addEventListener('click', () => { memActiveProjId = p.proj_id; memLoadEpisodes(); document.querySelectorAll('.mem-proj-row').forEach(r=>r.classList.remove('active')); row.classList.add('active'); });
+      el.appendChild(row);
+    });
+    if (list.length && !memActiveProjId) {
+      el.firstChild.click();
+    }
+  } catch(e) { console.error(e); }
+}
+
+function memSetLayer(layer, btn) {
+  memActiveLayer = layer;
+  document.querySelectorAll('.mem-layer-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  memLoadEpisodes();
+}
+
+async function memLoadEpisodes() {
+  if (!memActiveProjId) return;
+  let url = `/api/episodes/${memActiveProjId}?limit=500`;
+  if (memActiveLayer !== null) url += `&layer=${memActiveLayer}`;
+  try {
+    const res = await fetch(url);
+    const eps = await res.json();
+    const el = document.getElementById('mem-ep-list');
+    el.innerHTML = '';
+    if (!eps.length) { el.innerHTML = '<div class="mem-empty">No episodes</div>'; return; }
+    eps.reverse().forEach(ep => {
+      const row = document.createElement('div');
+      row.className = `mem-ep-row l${ep.layer}`;
+      row.innerHTML = `<span class="mem-ep-layer">L${ep.layer}</span><span class="mem-ep-cat ${ep.category}">${esc(ep.category)}</span><span class="mem-ep-id">${esc(ep.id)}</span><span class="mem-ep-imp">${ep.importance}</span>`;
+      row.addEventListener('click', () => { document.querySelectorAll('.mem-ep-row').forEach(r=>r.classList.remove('active')); row.classList.add('active'); memLoadDetail(ep.id); });
+      el.appendChild(row);
+    });
+  } catch(e) { console.error(e); }
+}
+
+async function memLoadDetail(epId) {
+  try {
+    const res = await fetch(`/api/episode/${memActiveProjId}/${epId}`);
+    const ep = await res.json();
+    document.getElementById('mem-detail-id').textContent = ep.id;
+    document.getElementById('mem-detail-meta').innerHTML = [
+      `L${ep.layer}`, ep.category,
+      `imp ${ep.importance}`,
+      ep.embedded ? '<span style="color:var(--match)">embedded</span>' : '<span style="color:var(--embfail)">not embedded</span>',
+      ep.session_id ? `sess ${ep.session_id.slice(0,8)}` : '',
+      ep.created_at ? ep.created_at.slice(0,16).replace('T',' ') : '',
+      (ep.tags||[]).join(' '),
+    ].filter(Boolean).map(s=>`<span>${s}</span>`).join('');
+    document.getElementById('mem-detail-body').textContent = ep.content || '(no content)';
+  } catch(e) { console.error(e); }
+}
 
 // ── Start polling ──────────────────────────────────────────────────────────
 pollInterval = setInterval(poll, 500);
