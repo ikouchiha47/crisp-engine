@@ -452,21 +452,45 @@ function eventBadge(name) {
 
 function buildDetail(e, p) {
   const parts = [];
-  if (p.event_type)    parts.push(`<span class="hi">${esc(p.event_type)}</span>`);
-  if (p.tool_name)     parts.push(`<span class="hi">${esc(p.tool_name)}</span>`);
-  if (p.watcher_name)  parts.push(`<span class="hi">${esc(p.watcher_name)}</span>`);
-  if (p.agent)         parts.push(esc(p.agent));
-  if (p.provider)      parts.push(esc(p.provider));
-  if (p.success === true)  parts.push('<span class="ok">OK</span>');
-  if (p.success === false) parts.push('<span class="err">FAIL</span>');
-  if (p.fallback_used) parts.push('<span class="wrn">fallback</span>');
-  if (p.id)            parts.push(`<span class="hi">${esc(p.id)}</span>`);
-  if (p.layer !== undefined) parts.push(`L${p.layer}`);
-  if (p.category)      parts.push(esc(p.category));
-  if (p.importance)    parts.push(`imp=<span class="wrn">${p.importance}</span>`);
-  if (p.l0_in !== undefined) parts.push(`l0_in=<span class="hi">${p.l0_in}</span>`);
-  if (p.l1_created)    parts.push(`l1=<span class="ok">${p.l1_created}</span>`);
-  if (p.project)       parts.push(`<span class="lo">${esc(p.project.split('/').pop())}</span>`);
+  const ev = e.event || '';
+
+  if (ev === 'hook_fired') {
+    // pre_tool Edit  /  post_tool Bash  — action is the key thing
+    if (p.tool_name)  parts.push(`<span class="hi">${esc(p.tool_name)}</span>`);
+    if (p.event_type) parts.push(`<span class="lo">${esc(p.event_type)}</span>`);
+    if (p.agent)      parts.push(esc(p.agent));
+
+  } else if (ev === 'watcher_matched' || ev === 'watcher_skipped') {
+    if (p.watcher_name) parts.push(`<span class="hi">${esc(p.watcher_name)}</span>`);
+    if (p.episode_count !== undefined) parts.push(`${p.episode_count} ep`);
+
+  } else if (ev === 'episode_saved') {
+    // show category + short id
+    if (p.category)  parts.push(`<span class="hi">${esc(p.category)}</span>`);
+    if (p.id)        parts.push(`<span class="lo">${esc(p.id)}</span>`);
+    if (p.layer !== undefined) parts.push(`L${p.layer}`);
+    if (p.importance) parts.push(`imp <span class="wrn">${p.importance}</span>`);
+    if (p.embedded === false) parts.push('<span class="wrn">not embedded</span>');
+
+  } else if (ev === 'embed_result') {
+    if (p.provider)      parts.push(`<span class="hi">${esc(p.provider)}</span>`);
+    if (p.success === true)  parts.push('<span class="ok">OK</span>');
+    if (p.success === false) parts.push('<span class="err">FAIL</span>');
+    if (p.fallback_used) parts.push('<span class="wrn">fallback</span>');
+
+  } else if (ev === 'reflect_ran') {
+    if (p.l0_in !== undefined) parts.push(`in <span class="hi">${p.l0_in}</span>`);
+    if (p.l1_created) parts.push(`l1+${p.l1_created}`);
+    if (p.l2_created) parts.push(`l2+${p.l2_created}`);
+    if (p.l3_created) parts.push(`l3+${p.l3_created}`);
+
+  } else {
+    // fallback: dump everything useful
+    if (p.event_type)   parts.push(esc(p.event_type));
+    if (p.tool_name)    parts.push(esc(p.tool_name));
+    if (p.id)           parts.push(esc(p.id));
+  }
+
   return parts.join(' · ');
 }
 
