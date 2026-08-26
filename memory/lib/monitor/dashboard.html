@@ -139,7 +139,10 @@ html, body { height: 100%; background: var(--bg); color: var(--ink); font-family
 .pause-btn.paused { color: var(--alarm); }
 
 /* ── Body ── */
-.body { display: grid; grid-template-columns: 148px 1fr 218px; overflow: hidden; }
+.body { display: grid; grid-template-columns: 148px 1fr 218px; overflow: hidden; grid-row: 5; }
+
+/* mem-view occupies the same grid row as .body so toggling display: none on either works */
+#mem-view { grid-row: 5; }
 
 /* ── Sidebar ── */
 .sidebar { border-right: 1px solid var(--ink); background: var(--bg-panel); display: flex; flex-direction: column; overflow: hidden; }
@@ -521,10 +524,12 @@ let activeSid = null;
 let filterSid = null;  // null = show all
 
 function bestDir(path) {
-  // returns the dir name only for real absolute paths; null for '-', null, short IDs
   if (!path || path === '-' || path === 'null') return null;
-  if (!path.startsWith('/')) return null;  // not a real path
-  return path.split('/').filter(Boolean).pop();
+  const parts = path.split('/').filter(Boolean);
+  if (!parts.length) return null;
+  // if last segment looks like a filename (has a dot), drop it to get the containing dir
+  if (parts[parts.length - 1].includes('.')) parts.pop();
+  return parts.pop() || null;
 }
 
 function ensureProject(dir, fullPath) {
@@ -805,11 +810,14 @@ let memActiveProjId = null;
 let memActiveLayer  = null;
 
 async function memLoadProjects() {
+  const el = document.getElementById('mem-projects');
+  el.innerHTML = '<div class="mem-empty">Loading...</div>';
   try {
     const res = await fetch('/api/projects');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const list = await res.json();
-    const el = document.getElementById('mem-projects');
     el.innerHTML = '';
+    if (!list.length) { el.innerHTML = '<div class="mem-empty">No projects found</div>'; return; }
     list.forEach(p => {
       const row = document.createElement('div');
       row.className = 'mem-proj-row';
@@ -817,13 +825,19 @@ async function memLoadProjects() {
       const layers = Object.entries(p.layers).map(([l,n]) =>
         `<span class="mem-lbadge ${l}">${l.toUpperCase()} ${n}</span>`).join(' ');
       row.innerHTML = `<div class="mem-proj-name">${esc(p.name)}</div><div class="mem-proj-stats">${layers}</div>`;
-      row.addEventListener('click', () => { memActiveProjId = p.proj_id; memLoadEpisodes(); document.querySelectorAll('.mem-proj-row').forEach(r=>r.classList.remove('active')); row.classList.add('active'); });
+      row.addEventListener('click', () => {
+        memActiveProjId = p.proj_id;
+        document.querySelectorAll('.mem-proj-row').forEach(r=>r.classList.remove('active'));
+        row.classList.add('active');
+        memLoadEpisodes();
+      });
       el.appendChild(row);
     });
-    if (list.length && !memActiveProjId) {
-      el.firstChild.click();
-    }
-  } catch(e) { console.error(e); }
+    if (!memActiveProjId) el.firstChild.click();
+  } catch(e) {
+    console.error('memLoadProjects:', e);
+    el.innerHTML = `<div class="mem-empty">Error: ${esc(e.message)}</div>`;
+  }
 }
 
 function memSetLayer(layer, btn) {
@@ -870,8 +884,22 @@ async function memLoadDetail(epId) {
   } catch(e) { console.error(e); }
 }
 
+// ── Seed sidebar from stored sessions (don't wait for events to trickle in) ─
+async function seedSidebar() {
+  try {
+    const res = await fetch('/api/sessions');
+    if (!res.ok) return;
+    const sessions = await res.json();
+    // sessions is [{session, project}, ...] most-recent first
+    sessions.forEach(s => {
+      if (s.session) updateSessionList(s.session, s.project || '-');
+    });
+  } catch(_) {}
+}
+
 // ── Start polling ──────────────────────────────────────────────────────────
 pollInterval = setInterval(poll, 500);
+seedSidebar();
 poll();
 </script>
 </body>

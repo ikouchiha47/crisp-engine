@@ -98,6 +98,15 @@ class EmbedResult:
 
 
 @dataclass
+class ContextInjected:
+    session_id: str
+    project: str
+    tool: str
+    char_count: int
+    _event: str = field(default="context_injected", init=False, repr=False)
+
+
+@dataclass
 class ReflectRan:
     l0_in: int
     session_id: str = ""
@@ -108,7 +117,7 @@ class ReflectRan:
     _event: str = field(default="reflect_ran", init=False, repr=False)
 
 
-BusEvent = HookFired | WatcherMatched | WatcherSkipped | EpisodeSaved | EmbedResult | ReflectRan
+BusEvent = HookFired | WatcherMatched | WatcherSkipped | EpisodeSaved | EmbedResult | ContextInjected | ReflectRan
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +155,22 @@ def tail(since_id: int = 0, limit: int = 100) -> list[dict]:
             }
             for r in rows
         ]
+    except Exception:
+        return []
+
+
+def distinct_sessions(limit: int = 500) -> list[dict]:
+    """Return distinct (session, project) pairs seen in the bus, most recent first."""
+    try:
+        con = _reader_con()
+        rows = con.execute(
+            "SELECT session, project, MAX(id) as last_id "
+            "FROM events WHERE session IS NOT NULL AND session != '' "
+            "GROUP BY session, project ORDER BY last_id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        con.close()
+        return [{"session": r[0], "project": r[1]} for r in rows]
     except Exception:
         return []
 

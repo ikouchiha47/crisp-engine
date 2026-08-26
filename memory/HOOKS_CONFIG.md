@@ -28,8 +28,12 @@ write a small JSON result to stdout.
 
 Claude Code uses an **array-of-matchers** schema, and `timeout` is in **seconds**.
 Add this to `~/.claude/settings.json` (merge with any existing `hooks` — do not
-replace the object). The per-tool observers use `"async": true` so they add **zero
-latency** and can never block/deny a tool — they are pure observation.
+replace the object). Most per-tool observers use `"async": true` so they add
+**zero latency** and can never block/deny a tool — they are pure observation.
+**`PreToolUse` is the one exception**: it must run synchronously (no `"async"`
+key at all) because `additionalContext` injection only reaches the model when
+Claude Code waits for the hook's stdout — an async `PreToolUse` hook fires
+but its output is discarded.
 
 ```json
 {
@@ -45,7 +49,7 @@ latency** and can never block/deny a tool — they are pure observation.
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "\"$HOME/.local/bin/crisp-hook\" claude-pre-tool", "async": true, "timeout": 10 }
+          { "type": "command", "command": "\"$HOME/.local/bin/crisp-hook\" claude-pre-tool", "timeout": 10 }
         ]
       }
     ],

@@ -33,7 +33,10 @@ def test_non_file_tool_returns_empty_dict():
     assert result == {}
 
 
-def test_matching_code_element_episode_is_injected_in_real_schema_shape():
+def test_code_element_episode_is_never_injected():
+    # Phase 1.6 (docs/next-steps-sequence.md): code_element is a structural/
+    # searchable category (see lib/memory_policy.py), never injected as raw
+    # context — that's crisp graph show's job now, not blind PreToolUse dump.
     handler = _handler()
     file_path = str(Path(tempfile.mkdtemp()) / "auth.py")
 
@@ -53,27 +56,22 @@ def test_matching_code_element_episode_is_injected_in_real_schema_shape():
         "tool_name": "Read",
         "tool_input": {"file_path": file_path},
     })
-
-    assert "hookSpecificOutput" in result
-    assert result["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
-    context = result["hookSpecificOutput"]["additionalContext"]
-    assert "verify_token" in context
-    assert "auth.py" in context
+    assert result == {}
 
 
-def test_stale_episode_is_not_injected():
+def test_correction_episode_is_injected_in_real_schema_shape():
     handler = _handler()
     file_path = str(Path(tempfile.mkdtemp()) / "auth.py")
 
     ep = MemoryEpisode(
-        id="code_abc123_verify_token",
+        id="correction_001",
         session_id="sess_test",
         timestamp="2026-01-01T00:00:00Z",
-        title="Function: verify_token",
-        content="stale content",
-        category="code_element",
-        source_path=str(Path(file_path).resolve()),
-        tags=["function", "python", "stale"],
+        layer=1,
+        title="Correction applied",
+        content="User correction: never store JWT secrets in plaintext config.",
+        category="correction",
+        correction_applied=True,
     )
     handler.store.save_episode(ep)
 
@@ -81,4 +79,8 @@ def test_stale_episode_is_not_injected():
         "tool_name": "Read",
         "tool_input": {"file_path": file_path},
     })
-    assert result == {}
+
+    assert "hookSpecificOutput" in result
+    assert result["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "never store JWT secrets" in context

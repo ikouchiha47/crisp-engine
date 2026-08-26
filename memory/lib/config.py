@@ -26,6 +26,15 @@ _ENV_MAP = {
     "CRISP_EMBEDDING_DIM":      "embedding_dim",
     "CRISP_STORE_BACKEND":      "store_backend",
     "CRISP_DB_PATH":            "db_path",
+    "CRISP_CONSOLIDATE_L2L3":  "consolidation_l2l3_auto",
+    "CRISP_GENERATE_PROVIDER":    "generate_provider",
+    "CRISP_GENERATE_MODEL":       "generate_model",
+    "CRISP_GENERATE_API_URL":     "generate_api_url",
+    "CRISP_GENERATE_THINK":       "generate_think",
+    "CRISP_GENERATE_TEMPERATURE": "generate_temperature",
+    "CRISP_GENERATE_TOP_P":       "generate_top_p",
+    "CRISP_GENERATE_TOP_K":       "generate_top_k",
+    "CRISP_GENERATE_TIMEOUT":     "generate_timeout",
 }
 
 # ── Default global config path ───────────────────────────────────────────────
@@ -102,7 +111,30 @@ def load(
         except (ValueError, TypeError):
             pass
 
+    # Coerce generate_* numeric/bool config values — these arrive as strings
+    # from env vars / .crisp.json and must reach lib/generate.py typed
+    # correctly (a truthy string "false" must not coerce to Python True).
+    if "generate_think" in merged:
+        merged["generate_think"] = _coerce_bool(merged["generate_think"])
+    for key in ("generate_temperature", "generate_top_p", "generate_timeout"):
+        if key in merged:
+            try:
+                merged[key] = float(merged[key])
+            except (ValueError, TypeError):
+                pass
+    if "generate_top_k" in merged:
+        try:
+            merged["generate_top_k"] = int(merged["generate_top_k"])
+        except (ValueError, TypeError):
+            pass
+
     return merged
+
+
+def _coerce_bool(val: Any) -> bool:
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
 def write_global(updates: Dict[str, Any]) -> None:

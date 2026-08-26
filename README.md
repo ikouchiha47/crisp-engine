@@ -1,5 +1,7 @@
 # Crisp Engine
 
+> **Deprecated.** Superseded by [supermemory](https://github.com/supermemoryai/supermemory) — production-grade, benchmarked (#1 on LongMemEval/LoCoMo/ConvoMem), self-hostable, with a shipped Claude Code integration. This repo's memory pipeline had no real differentiator once compared directly; see `memory/AUDIT.md` and `docs/next-steps-sequence.md` for the full audit trail. The one component kept out of this: the code call-graph (`memory/lib/graph/`, `crisp graph explain/path`) — not something supermemory does, may live on separately.
+
 Episodic memory for Claude Code. Every file you edit, every correction you give, every commit you push gets captured, summarised, and promoted through four layers so future sessions know what past ones learned.
 
 ```
@@ -51,12 +53,14 @@ Add to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "PreToolUse":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "crisp-hook claude-pre-tool",  "async": true, "timeout": 10 }] }],
+    "PreToolUse":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "crisp-hook claude-pre-tool",  "timeout": 10 }] }],
     "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "crisp-hook claude-post-tool", "async": true, "timeout": 10 }] }],
     "Stop":        [{ "hooks": [{ "type": "command", "command": "crisp-hook claude-stop",        "async": true, "timeout": 10 }] }]
   }
 }
 ```
+
+`PreToolUse` must stay synchronous (no `"async"` key) — that's what lets `additionalContext` reach the model; every other hook can be `"async": true` since they're pure observation.
 
 See `HOOKS_CONFIG.md` for the full setup including `SessionStart`, `SessionEnd`, and `PreCompact`.
 

@@ -28,6 +28,7 @@ def run(host: str = "127.0.0.1", port: int = 7654) -> None:
         )
 
     from lib.bus import tail, latest_id
+    from lib.session import all_sessions
     from lib.store import MemoryStore
     from lib import config as _cfg
     from lib.store.project_memory import ProjectMemoryManager
@@ -82,6 +83,11 @@ def run(host: str = "127.0.0.1", port: int = 7654) -> None:
     @app.get("/api/latest-id")
     async def get_latest():
         return JSONResponse({"id": latest_id()})
+
+    @app.get("/api/sessions")
+    async def get_sessions():
+        """Return all sessions from the bus SQLite sessions table — written idempotently at session_start."""
+        return JSONResponse(all_sessions())
 
     @app.get("/api/projects")
     async def projects():

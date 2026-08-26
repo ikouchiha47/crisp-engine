@@ -222,11 +222,11 @@ def test_reflection():
                 timestamp=f"2026-05-01T15:{i:02d}:00Z",
                 title=f"Episode {i}",
                 content=f"Content for episode {i}",
-                category="test",
+                category="conversation",  # must be an episodic category (lib/memory_policy.py)
                 importance=0.5,
             )
             store.save_episode(episode)
-        
+
         # Run consolidation
         reflector = MemoryReflector(store)
         result = reflector.consolidate(max_l0_per_batch=20)

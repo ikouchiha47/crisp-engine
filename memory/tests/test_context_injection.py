@@ -2,6 +2,10 @@
 
 Tests are unit-level: they mock the store and verify the shape of what
 each adapter returns, without hitting disk or a real embedding provider.
+
+Rewritten for docs/next-steps-sequence.md Phase 1.6: build_context_block is
+now a single allowlisted pass (memory_policy.is_injectable) — no raw
+code_element file dump, no tool-frequency instinct noise. See lib/hooks/injection.py.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.hooks import MemoryHookHandler
+from lib.hooks.injection import ContextInjector
 from lib.store import MemoryEpisode
 
 
@@ -44,93 +49,95 @@ def _instinct_ep(tool: str, content: str, confidence: float = 0.7) -> MemoryEpis
     return ep
 
 
+def _correction_ep(content: str) -> MemoryEpisode:
+    return _ep(
+        id="correction_1", layer=1, category="correction",
+        content=content, importance=1.0,
+    )
+
+
+def _injector(episodes: list[MemoryEpisode]) -> ContextInjector:
+    store = MagicMock()
+    store.list_episodes.return_value = episodes
+    store.config = {}
+    return ContextInjector(store)
+
+
 def _handler(episodes: list[MemoryEpisode]) -> MemoryHookHandler:
     store = MagicMock()
     store.list_episodes.return_value = episodes
     store.config = {}
-    h = MemoryHookHandler.__new__(MemoryHookHandler)
-    h.store = store
-    h.analyzer = MagicMock()
-    h._embed_provider = None
-    h._watcher_registry = None
-    h._project_root = "/tmp/myproject"
-    h._post_tool_count = 0
-    return h
+    return MemoryHookHandler(store)
 
 
-# ── build_context_block ───────────────────────────────────────────────────────
+# ── build_context_block (via ContextInjector directly) ───────────────────────
 
 class TestBuildContextBlock:
     def test_empty_when_no_episodes(self):
-        h = _handler([])
-        block = h.build_context_block("Edit", {"file_path": "/tmp/foo.py"}, "sess")
+        inj = _injector([])
+        block = inj.build_context_block("Edit", {"file_path": "/tmp/foo.py"}, "sess")
         assert block == ""
 
     def test_instinct_included_above_threshold(self):
         eps = [_instinct_ep("Edit", "Prefers small atomic edits.", confidence=0.8)]
-        h = _handler(eps)
-        block = h.build_context_block("Edit", {}, "sess")
-        assert "[crisp instincts]" in block
+        inj = _injector(eps)
+        block = inj.build_context_block("Edit", {}, "sess")
         assert "Prefers small atomic edits." in block
         assert "0.80" in block
 
     def test_instinct_excluded_below_threshold(self):
         eps = [_instinct_ep("Edit", "Some pattern.", confidence=0.3)]
-        h = _handler(eps)
-        block = h.build_context_block("Edit", {}, "sess")
+        inj = _injector(eps)
+        block = inj.build_context_block("Edit", {}, "sess")
         assert block == ""
 
     def test_instinct_not_included_for_wrong_tool(self):
         eps = [_instinct_ep("Bash", "Runs python3 often.", confidence=0.9)]
-        h = _handler(eps)
-        block = h.build_context_block("Edit", {}, "sess")
+        inj = _injector(eps)
+        block = inj.build_context_block("Edit", {}, "sess")
         assert block == ""
 
-    def test_episodic_memory_for_matching_file(self):
+    def test_code_element_never_injected_even_for_matching_file(self):
+        # code_element is structural (lib/memory_policy.py), never injected —
+        # that's crisp graph show's job now, not blind PreToolUse dump.
         file_path = str(Path("/tmp/hooks.py").resolve())
         eps = [_ep(
             id="ep_hooks", category="code_element", source_path=file_path,
             content="def _save(episode): ...", title="_save",
         )]
-        h = _handler(eps)
-        block = h.build_context_block("Edit", {"file_path": "/tmp/hooks.py"}, "sess")
-        assert "hooks.py" in block
-        assert "_save" in block
-
-    def test_episodic_stale_excluded(self):
-        file_path = str(Path("/tmp/hooks.py").resolve())
-        eps = [_ep(
-            id="ep_stale", category="code_element", source_path=file_path,
-            content="old content", title="old", tags=["stale"],
-        )]
-        h = _handler(eps)
-        block = h.build_context_block("Edit", {"file_path": "/tmp/hooks.py"}, "sess")
+        inj = _injector(eps)
+        block = inj.build_context_block("Edit", {"file_path": "/tmp/hooks.py"}, "sess")
         assert block == ""
 
-    def test_no_episodic_for_bash(self):
-        file_path = str(Path("/tmp/hooks.py").resolve())
-        eps = [_ep(source_path=file_path, content="something")]
-        h = _handler(eps)
-        block = h.build_context_block("Bash", {"command": "ls"}, "sess")
+    def test_correction_is_always_injected(self):
+        eps = [_correction_ep("Never store JWT secrets in plaintext config.")]
+        inj = _injector(eps)
+        block = inj.build_context_block("Edit", {"file_path": "/tmp/hooks.py"}, "sess")
+        assert "Never store JWT secrets in plaintext config." in block
+
+    def test_no_correction_for_unrelated_query(self):
+        # correction/preference episodes are tool-agnostic — always eligible,
+        # so an empty store is what actually proves nothing leaks in.
+        inj = _injector([])
+        block = inj.build_context_block("Bash", {"command": "ls"}, "sess")
         assert block == ""
 
-    def test_both_sections_present(self):
+    def test_preference_and_instinct_both_present(self):
         file_path = str(Path("/tmp/bus.py").resolve())
         eps = [
             _instinct_ep("Edit", "Prefers atomic edits.", confidence=0.75),
-            _ep(id="ep_bus", category="code_element", source_path=file_path,
-                content="def emit(): ...", title="emit"),
+            _correction_ep("Always run tests before committing."),
         ]
-        h = _handler(eps)
-        block = h.build_context_block("Edit", {"file_path": "/tmp/bus.py"}, "sess")
-        assert "[crisp instincts]" in block
-        assert "[crisp memory: bus.py]" in block
+        inj = _injector(eps)
+        block = inj.build_context_block("Edit", {"file_path": "/tmp/bus.py"}, "sess")
+        assert "Prefers atomic edits." in block
+        assert "Always run tests before committing." in block
 
-    def test_at_most_5_instincts(self):
-        eps = [_instinct_ep(f"Edit", f"Pattern {i}.", confidence=0.9 - i*0.01)
+    def test_at_most_5_injected(self):
+        eps = [_instinct_ep("Edit", f"Pattern {i}.", confidence=0.9 - i * 0.01)
                for i in range(10)]
-        h = _handler(eps)
-        block = h.build_context_block("Edit", {}, "sess")
+        inj = _injector(eps)
+        block = inj.build_context_block("Edit", {}, "sess")
         assert block.count("- Pattern") <= 5
 
 
@@ -138,8 +145,7 @@ class TestBuildContextBlock:
 
 class TestClaudePreToolContext:
     def test_returns_hook_specific_output_shape(self):
-        file_path = str(Path("/tmp/hooks.py").resolve())
-        eps = [_ep(source_path=file_path, content="def foo(): pass", title="foo")]
+        eps = [_correction_ep("Prefer small diffs over big rewrites.")]
         h = _handler(eps)
         result = h.handle_claude_pre_tool_context({
             "tool_name": "Edit",
@@ -160,46 +166,20 @@ class TestClaudePreToolContext:
         })
         assert result == {}
 
-    def test_returns_empty_for_non_file_tool(self):
+    def test_returns_empty_for_non_file_tool_with_no_matching_content(self):
         h = _handler([_instinct_ep("Bash", "runs git often", confidence=0.9)])
         result = h.handle_claude_pre_tool_context({
-            "tool_name": "Bash",
-            "tool_input": {"command": "git log"},
+            "tool_name": "Ls",
+            "tool_input": {},
             "session_id": "sess",
         })
-        # Bash has no file_path so episodic section empty; instinct block
-        # would appear IF there were Bash instincts — verify shape when present
-        # (instinct section is tool-keyed, Bash instinct would appear)
-        assert isinstance(result, dict)
+        assert result == {}
 
 
 # ── get_instincts event (OpenCode system.transform path) ─────────────────────
 
 class TestGetInstinctsEvent:
     """Integration-level: run main() with opencode-get-instincts argv."""
-
-    def _run_main(self, argv: list[str], stdin_payload: dict) -> dict:
-        import io
-        captured = {}
-        orig_argv = sys.argv[:]
-        orig_stdin = sys.stdin
-
-        sys.argv = argv
-        sys.stdin = io.StringIO(json.dumps(stdin_payload))
-        output_lines = []
-
-        with patch("builtins.print", side_effect=lambda s: output_lines.append(s)):
-            try:
-                import importlib
-                import lib.hooks as hooks_mod
-                importlib.reload(hooks_mod)  # fresh module state
-                # Can't easily call main() in isolation; test via subprocess instead
-            except SystemExit:
-                pass
-
-        sys.argv = orig_argv
-        sys.stdin = orig_stdin
-        return output_lines
 
     def test_get_instincts_via_subprocess(self, tmp_path):
         import subprocess

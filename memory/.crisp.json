@@ -1,0 +1,5 @@
+{
+  "generate_model": "qwen3.5:4b",
+  "generate_think": "false",
+  "generate_timeout": "60"
+}

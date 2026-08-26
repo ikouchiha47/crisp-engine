@@ -5,8 +5,10 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .. import config as _cfg
 from ..bus import emit as _bus_emit, ReflectRan
 from ..code_index import CodeAnalyzer
+from ..memory_policy import is_episodic
 from ..store import MemoryEpisode, MemoryStore
 from ..time_utils import now_iso, parse_ts
 
@@ -42,7 +44,7 @@ class MemoryReflector:
         episodes = []
         for eid in episode_ids:
             ep = self.store.get_episode(eid)
-            if ep and ep.layer == 0:
+            if ep and ep.layer == 0 and is_episodic(ep.category):
                 episodes.append(ep)
 
         if not episodes:
@@ -318,12 +320,22 @@ class MemoryReflector:
 
         return l3
 
-    def consolidate(self, max_l0_per_batch: int = 20) -> Dict[str, Any]:
-        """Run consolidation: L0 → L1, L1 → L2, L2 → L3."""
+    def consolidate(self, max_l0_per_batch: int = 20, force_l2l3: bool = False) -> Dict[str, Any]:
+        """Run consolidation: L0 → L1 always; L1 → L2 → L3 only when
+        `consolidation_l2l3_auto` is enabled in config, or force_l2l3=True
+        (e.g. `crisp reflect --force-l2l3`) for a manual run.
+
+        L2/L3 are gated off by default: they cluster/arc whatever L1s exist
+        with no quality check, and previously ran on placeholder-derived and
+        code_element-poisoned L1s. Off by default until Phase 3 (local
+        distill) gives L1 real content worth clustering.
+        """
         result = {"l1_created": 0, "l2_created": 0, "l3_created": 0}
 
-        # Get all L0 episodes not yet summarized
-        l0_episodes = self.store.list_episodes(layer=0)
+        # Get all L0 episodes not yet summarized — episodic categories only.
+        # code_element/code_index_dir are structural (see memory_policy.py),
+        # never consolidatable into a session summary.
+        l0_episodes = [ep for ep in self.store.list_episodes(layer=0) if is_episodic(ep.category)]
         l0_episodes.sort(key=lambda e: e.timestamp)
 
         # Group by session and create L1 summaries
@@ -346,35 +358,37 @@ class MemoryReflector:
                         self.store._write_raw(ep)
                     result["l1_created"] += 1
 
-        # L1 → L2 clustering (simplified: group by common tags)
-        l1_episodes = self.store.list_episodes(layer=1)
-        if len(l1_episodes) >= 10:
-            # Group by common categories
-            categories = defaultdict(list)
-            for ep in l1_episodes:
-                cat = (
-                    ep.context_snapshot.get("categories", ["general"])[0]
-                    if ep.context_snapshot
-                    else "general"
+        l2l3_auto = str(_cfg.load().get("consolidation_l2l3_auto", "")).lower() in ("1", "true", "yes")
+        if l2l3_auto or force_l2l3:
+            # L1 → L2 clustering (simplified: group by common tags)
+            l1_episodes = self.store.list_episodes(layer=1)
+            if len(l1_episodes) >= 10:
+                # Group by common categories
+                categories = defaultdict(list)
+                for ep in l1_episodes:
+                    cat = (
+                        ep.context_snapshot.get("categories", ["general"])[0]
+                        if ep.context_snapshot
+                        else "general"
+                    )
+                    categories[cat].append(ep.id)
+
+                for topic, ids in categories.items():
+                    if len(ids) >= 10:
+                        l2 = self.generate_l2_cluster(ids[:10], topic)
+                        if l2:
+                            self.store.save_episode(l2)
+                            result["l2_created"] += 1
+
+            # L2 → L3 (if we have multiple clusters)
+            l2_episodes = self.store.list_episodes(layer=2)
+            if len(l2_episodes) >= 3:
+                l3 = self.generate_l3_arc(
+                    [ep.id for ep in l2_episodes[:3]], "Personal Development"
                 )
-                categories[cat].append(ep.id)
-
-            for topic, ids in categories.items():
-                if len(ids) >= 10:
-                    l2 = self.generate_l2_cluster(ids[:10], topic)
-                    if l2:
-                        self.store.save_episode(l2)
-                        result["l2_created"] += 1
-
-        # L2 → L3 (if we have multiple clusters)
-        l2_episodes = self.store.list_episodes(layer=2)
-        if len(l2_episodes) >= 3:
-            l3 = self.generate_l3_arc(
-                [ep.id for ep in l2_episodes[:3]], "Personal Development"
-            )
-            if l3:
-                self.store.save_episode(l3)
-                result["l3_created"] += 1
+                if l3:
+                    self.store.save_episode(l3)
+                    result["l3_created"] += 1
 
         try:
             _bus_emit(ReflectRan(

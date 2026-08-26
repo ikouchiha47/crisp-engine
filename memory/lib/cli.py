@@ -225,7 +225,7 @@ def cmd_reflect(args):
     reflector = MemoryReflector(store)
 
     print("Running consolidation...")
-    result = reflector.consolidate(max_l0_per_batch=args.batch_size)
+    result = reflector.consolidate(max_l0_per_batch=args.batch_size, force_l2l3=args.force_l2l3)
 
     print(f"\nConsolidation complete:")
     print(f"  L1 created: {result['l1_created']}")
@@ -870,10 +870,15 @@ def cmd_config(args):
         merged = _cfg.load(cwd=os.getcwd())
         emb_keys = ["embedding_provider", "embedding_model", "embedding_api_url", "embedding_dim",
                     "store_backend", "db_path"]
+        gen_keys = ["generate_provider", "generate_model", "generate_api_url", "generate_think",
+                    "generate_temperature", "generate_top_p", "generate_top_k", "generate_timeout"]
         print(f"Global config : {_cfg.GLOBAL_CONFIG_PATH}")
         print(f"Project config: {os.getcwd()}/.crisp.json\n")
         print("Merged embedding/store config:")
         for k in emb_keys:
+            print(f"  {k} = {merged.get(k, '(unset)')}")
+        print("\nMerged generation/distill config:")
+        for k in gen_keys:
             print(f"  {k} = {merged.get(k, '(unset)')}")
         return
     if action == "set":
@@ -1003,6 +1008,106 @@ def cmd_monitor(args):
     run(host=args.host, port=args.port)
 
 
+def _graph_path(args) -> Path:
+    store = get_store()
+    from lib.graph.graphstore import GRAPH_FILENAME
+    return Path(store.cache_path) / GRAPH_FILENAME
+
+
+def cmd_graph(args):
+    """Cross-file code call graph: build / stats / show."""
+    from lib.graph import graphstore, query
+
+    action = getattr(args, "graph_action", None)
+    graph_file = _graph_path(args)
+
+    if action == "build":
+        directory = args.path or "."
+        G = graphstore.build_graph(directory)
+        graphstore.save_graph(G, graph_file)
+        print(f"✓ built graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges -> {graph_file}")
+    elif action == "stats":
+        if not graph_file.exists():
+            print("No graph built yet. Run: crisp graph build <path>")
+            return
+        G = graphstore.load_graph(graph_file)
+        by_conf: dict[str, int] = {}
+        for _, _, attrs in G.edges(data=True):
+            c = attrs.get("confidence", "?")
+            by_conf[c] = by_conf.get(c, 0) + 1
+        print(f"Nodes: {G.number_of_nodes()}")
+        print(f"Edges: {G.number_of_edges()}")
+        for conf, count in sorted(by_conf.items()):
+            print(f"  {conf}: {count}")
+    elif action == "show":
+        if not graph_file.exists():
+            print("No graph built yet. Run: crisp graph build <path>")
+            return
+        G = graphstore.load_graph(graph_file)
+        matches = query.find_node_by_name(G, args.symbol)
+        if not matches:
+            print(f"No node named '{args.symbol}' in graph.")
+            return
+        for node_id in matches:
+            attrs = G.nodes[node_id]
+            print(f"\n{attrs['name']} ({attrs['type']}) — {attrs['file_path']}:{attrs['start_line']}")
+            callers = query.callers_of(G, node_id)
+            callees = query.callees_of(G, node_id)
+            print(f"  callers ({len(callers)}):")
+            for c in callers:
+                print(f"    - {c['name']} [{c['confidence']}] — {c['file_path']}:{c['start_line']}")
+            print(f"  callees ({len(callees)}):")
+            for c in callees:
+                print(f"    - {c['name']} [{c['confidence']}] — {c['file_path']}:{c['start_line']}")
+    elif action == "explain":
+        if not graph_file.exists():
+            print("No graph built yet. Run: crisp graph build <path>")
+            return
+        G = graphstore.load_graph(graph_file)
+        matches = query.find_node_by_name(G, args.symbol)
+        if not matches:
+            print(f"No node named '{args.symbol}' in graph.")
+            return
+        for node_id in matches:
+            attrs = G.nodes[node_id]
+            callers = query.callers_of(G, node_id)
+            callees = query.callees_of(G, node_id)
+            print(f"Node: {attrs['name']}")
+            print(f"  Source:    {attrs['file_path']} L{attrs['start_line']}")
+            print(f"  Community: {attrs.get('community', 0)}")
+            print(f"  Degree:    {len(callers) + len(callees)}")
+            print(f"\nConnections ({len(callers) + len(callees)}):")
+            for c in callees:
+                print(f"  --> {c['name']} [{c['relation']}] [{c['confidence']}]")
+            for c in callers:
+                print(f"  <-- {c['name']} [{c['relation']}] [{c['confidence']}]")
+    elif action == "path":
+        if not graph_file.exists():
+            print("No graph built yet. Run: crisp graph build <path>")
+            return
+        G = graphstore.load_graph(graph_file)
+        src_matches = query.find_node_by_name(G, args.source)
+        dst_matches = query.find_node_by_name(G, args.target)
+        if not src_matches:
+            print(f"No node named '{args.source}' in graph.")
+            return
+        if not dst_matches:
+            print(f"No node named '{args.target}' in graph.")
+            return
+        hops = query.shortest_path(G, src_matches[0], dst_matches[0])
+        if not hops:
+            print(f"No path found between '{args.source}' and '{args.target}'.")
+            return
+        print(f"Shortest path ({len(hops)} hops):")
+        parts = [G.nodes[hops[0]["from"]]["name"]]
+        for h in hops:
+            arrow = f"<--{h['relation']}--" if h["reversed"] else f"--{h['relation']}-->"
+            parts.append(f"{arrow} {G.nodes[h['to']]['name']}()")
+        print("  " + " ".join(parts))
+    else:
+        print("Usage: crisp graph <build|stats|show|explain|path> ...")
+
+
 def cmd_instinct(args):
     """Inspect and manage continuous-learning instincts."""
     from lib.instincts import InstinctEngine
@@ -1113,6 +1218,10 @@ def main():
     reflect_parser = subparsers.add_parser("reflect", help="Run consolidation")
     reflect_parser.add_argument(
         "--batch-size", type=int, default=20, help="L0 batch size"
+    )
+    reflect_parser.add_argument(
+        "--force-l2l3", action="store_true",
+        help="Run L1->L2->L3 clustering even though it's off by default (see memory_policy.py)"
     )
 
     # Prune
@@ -1239,6 +1348,19 @@ def main():
     ip = inst_sub.add_parser("promote", help="Promote an instinct project->global")
     ip.add_argument("id")
 
+    graph_parser = subparsers.add_parser("graph", help="Cross-file code call graph")
+    graph_sub = graph_parser.add_subparsers(dest="graph_action")
+    gb = graph_sub.add_parser("build", help="Build the call graph for a directory")
+    gb.add_argument("path", nargs="?", default=".", help="Directory to analyze (default: cwd)")
+    graph_sub.add_parser("stats", help="Show node/edge counts and confidence breakdown")
+    gsh = graph_sub.add_parser("show", help="Show callers/callees of a symbol")
+    gsh.add_argument("symbol", help="Function/class name to look up")
+    gex = graph_sub.add_parser("explain", help="Full detail for a symbol: source, community, connections")
+    gex.add_argument("symbol", help="Function/class name to look up")
+    gp = graph_sub.add_parser("path", help="Shortest path between two symbols")
+    gp.add_argument("source", help="Starting symbol name")
+    gp.add_argument("target", help="Destination symbol name")
+
     mon_parser = subparsers.add_parser("monitor", help="Real-time observability web dashboard")
     mon_parser.add_argument("--port", type=int, default=7654, help="HTTP port (default: 7654)")
     mon_parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
@@ -1284,6 +1406,7 @@ def main():
         "observe": cmd_observe,
         "instinct": cmd_instinct,
         "monitor": cmd_monitor,
+        "graph": cmd_graph,
     }
 
     _log.info("cmd=%s", args.command, extra={"session_id": "-", "project": "-"})
