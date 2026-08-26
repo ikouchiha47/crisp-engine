@@ -44,6 +44,7 @@ class MemoryHookHandler:
         self.analyzer = CodeAnalyzer()
         self._embed_provider = None  # lazy: built on first episode save
         self._watcher_registry = None  # lazy: built on first PostToolUse
+        self._project_root = ""  # set on first resolved event, used by _save()
 
     def _save(self, episode: MemoryEpisode) -> bool:
         """Embed then save — single call site so embed is never forgotten."""
@@ -63,7 +64,7 @@ class MemoryHookHandler:
                 "importance": round(episode.importance, 3),
                 "embedded": bool(episode.embedding),
                 "session_id": episode.session_id,
-                "project": getattr(self.store, "project_root", "-"),
+                "project": self._project_root or "-",
             })
         except Exception:
             pass
@@ -99,6 +100,7 @@ class MemoryHookHandler:
                             "provider": type(self._embed_provider).__name__,
                             "success": True, "fallback_used": False,
                             "session_id": episode.session_id,
+                            "project": self._project_root or "-",
                         })
                     except Exception:
                         pass
@@ -123,6 +125,7 @@ class MemoryHookHandler:
                                 "provider": type(fallback).__name__,
                                 "success": True, "fallback_used": True,
                                 "session_id": episode.session_id,
+                                "project": self._project_root or "-",
                             })
                         except Exception:
                             pass
@@ -203,6 +206,8 @@ class MemoryHookHandler:
 
         session_id = data.get("session_id", "unknown")
         project_root = data.get("cwd", "") or data.get("project_root", "")
+        if project_root:
+            self._project_root = project_root
 
         # Mark code_index stale for file edits (still needed for index freshness)
         file_path = tool_input.get("file_path", "")
@@ -294,6 +299,7 @@ class MemoryHookHandler:
         """
         cwd = data.get("cwd") or data.get("project_dir")
         project_root = Path(cwd).resolve() if cwd else Path.cwd()
+        self._project_root = str(project_root)
         session_id = data.get("session_id", "unknown")
 
         log = _log_bind(session_id=session_id, project=str(project_root), name="hooks")
