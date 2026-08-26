@@ -431,71 +431,97 @@ function wBashActive() {
   document.getElementById('wl-bash').classList.remove('off');
 }
 
-// projects[dirName] = { fullPath, count, sessions: { sid: {count, el} }, el (proj row) }
+// projects[dir] = { fullPath, sessions:{sid->{count,el}}, el, sessContainer }
+// sidToDir[sid] = dir  — a session belongs to exactly one project group
 const projects = {};
+const sidToDir = {};
 let activeSid = null;
+let filterSid = null;  // null = show all
 
-function dirName(path) {
-  if (!path || path === '-') return null;
+function bestDir(path) {
+  // returns the dir name only for real absolute paths; null for '-', null, short IDs
+  if (!path || path === '-' || path === 'null') return null;
+  if (!path.startsWith('/')) return null;  // not a real path
   return path.split('/').filter(Boolean).pop();
+}
+
+function ensureProject(dir, fullPath) {
+  if (projects[dir]) return;
+  projects[dir] = { fullPath, sessions: {}, el: null, sessContainer: null };
+  const pEl = document.createElement('div');
+  pEl.className = 'proj-row';
+  pEl.title = fullPath || dir;
+  const sContainer = document.createElement('div');
+  projects[dir].el = pEl;
+  projects[dir].sessContainer = sContainer;
+  const list = document.getElementById('session-list');
+  list.appendChild(pEl);
+  list.appendChild(sContainer);
 }
 
 function updateSessionList(sid, project) {
   if (!sid) return;
-  const dir = dirName(project) || sid.slice(0, 7);
-  const fullPath = (project && project !== '-') ? project : null;
+  const dir = bestDir(project);
+  const fullPath = dir ? project : null;
 
-  // ensure project group exists
-  if (!projects[dir]) {
-    projects[dir] = { fullPath, count: 0, sessions: {}, el: null, sessContainer: null };
-    const pEl = document.createElement('div');
-    pEl.className = 'proj-row';
-    pEl.title = fullPath || dir;
-    const sContainer = document.createElement('div');
-    projects[dir].el = pEl;
-    projects[dir].sessContainer = sContainer;
-    const list = document.getElementById('session-list');
-    list.appendChild(pEl);
-    list.appendChild(sContainer);
+  // if we already know this session, try to upgrade its project if we got a better path
+  if (sidToDir[sid]) {
+    const existingDir = sidToDir[sid];
+    if (dir && dir !== existingDir) {
+      // better path found: move session row to correct group
+      const oldProj = projects[existingDir];
+      const sData = oldProj && oldProj.sessions[sid];
+      if (sData) {
+        ensureProject(dir, fullPath);
+        const newProj = projects[dir];
+        newProj.sessions[sid] = sData;
+        newProj.sessContainer.appendChild(sData.el);
+        delete oldProj.sessions[sid];
+        sidToDir[sid] = dir;
+        // clean up empty old group
+        if (Object.keys(oldProj.sessions).length === 0) {
+          oldProj.el.remove(); oldProj.sessContainer.remove();
+          delete projects[existingDir];
+        }
+      }
+    }
+    // count the event
+    const curDir = sidToDir[sid];
+    const proj = projects[curDir];
+    if (proj && proj.sessions[sid]) {
+      proj.sessions[sid].count++;
+      proj.sessions[sid].el.innerHTML = `<span class="sess-id">${esc(sid.slice(0,8))}</span><span class="sess-n">${proj.sessions[sid].count}</span>`;
+      const nSess = Object.keys(proj.sessions).length;
+      proj.el.innerHTML = `<span class="proj-name">${esc(curDir)}</span><span class="proj-n">${nSess}</span>`;
+    }
+    return;
   }
 
-  const proj = projects[dir];
-  proj.count++;
+  // first time seeing this session — assign to best dir we have, or a fallback
+  const assignDir = dir || 'unknown';
+  const assignPath = fullPath || null;
+  ensureProject(assignDir, assignPath);
+  sidToDir[sid] = assignDir;
 
-  // ensure session row exists under project
-  if (!proj.sessions[sid]) {
-    const sEl = document.createElement('div');
-    sEl.className = 'sess-row' + (!activeSid ? ' active' : '');
-    if (!activeSid) activeSid = sid;
-    sEl.dataset.sid = sid;
-    sEl.addEventListener('click', () => filterBySid(sid, sEl));
-    proj.sessions[sid] = { count: 0, el: sEl };
-    proj.sessContainer.appendChild(sEl);
-  }
+  const proj = projects[assignDir];
+  const sEl = document.createElement('div');
+  sEl.className = 'sess-row' + (!activeSid ? ' active' : '');
+  if (!activeSid) { activeSid = sid; }
+  sEl.dataset.sid = sid;
+  sEl.addEventListener('click', () => filterBySid(sid));
+  proj.sessions[sid] = { count: 1, el: sEl };
+  proj.sessContainer.appendChild(sEl);
 
-  proj.sessions[sid].count++;
-
-  // update project header
-  const totalSessions = Object.keys(proj.sessions).length;
-  proj.el.innerHTML = `<span class="proj-name">${esc(dir)}</span><span class="proj-n">${totalSessions} sess</span>`;
-
-  // update session row
-  const s = proj.sessions[sid];
-  s.el.innerHTML = `<span class="sess-id">${esc(sid.slice(0, 8))}</span><span class="sess-n">${s.count}</span>`;
+  sEl.innerHTML = `<span class="sess-id">${esc(sid.slice(0,8))}</span><span class="sess-n">1</span>`;
+  const nSess = Object.keys(proj.sessions).length;
+  proj.el.innerHTML = `<span class="proj-name">${esc(assignDir)}</span><span class="proj-n">${nSess}</span>`;
 }
 
-function filterBySid(sid, clickedEl) {
+function filterBySid(sid) {
+  filterSid = sid;
   activeSid = sid;
   document.querySelectorAll('.sess-row').forEach(r => r.classList.toggle('active', r.dataset.sid === sid));
-  // filter feed rows by session — stored in dataset.session set during addRow
-  document.querySelectorAll('#feed .ev').forEach(row => {
-    if (row.dataset.session && row.dataset.session !== sid) {
-      row.classList.add('hidden');
-    } else {
-      applyFilter(row);
-    }
-  });
-  updateFilterCount();
+  applyAllFilters();
 }
 
 // ── Badge class from event name ────────────────────────────────────────────
@@ -594,11 +620,12 @@ function applyFilter(row) {
   const raw = row.dataset.raw;
   const now = Date.now();
 
-  const inRange = activeRange === 0 || (now - ts) <= activeRange * 1000;
-  const inType  = activeTypes.has(type);
+  const inRange  = activeRange === 0 || (now - ts) <= activeRange * 1000;
+  const inType   = activeTypes.has(type);
   const inSearch = !searchText || raw.includes(searchText);
+  const inSid    = !filterSid || !row.dataset.session || row.dataset.session === filterSid;
 
-  row.classList.toggle('hidden', !(inRange && inType && inSearch));
+  row.classList.toggle('hidden', !(inRange && inType && inSearch && inSid));
 }
 
 function applyAllFilters() {
