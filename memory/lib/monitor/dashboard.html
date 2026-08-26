@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crisp Monitor</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #f8f8f6;
+  --bg-row:   #f2f2f0;
+  --bg-panel: #ffffff;
+  --ink:      #0d0d0d;
+  --rule:     #d8d8d5;
+  --muted:    #909090;
+  --dim:      #c8c8c4;
+
+  --hook:    #003cff;
+  --match:   #006630;
+  --skip:    #b8b8b4;
+  --saved:   #005c5c;
+  --embok:   #7a5500;
+  --embfail: #b82000;
+  --ref:     #5500bb;
+  --alarm:   #ff2600;
+
+  --mono: 'JetBrains Mono', monospace;
+  --cond: 'Barlow Condensed', sans-serif;
+}
+
+html, body { height: 100%; background: var(--bg); color: var(--ink); font-family: var(--mono); font-size: 12px; overflow: hidden; }
+
+.shell { display: grid; grid-template-rows: auto auto auto 1fr; height: 100vh; }
+
+/* ── Top bar ── */
+.topbar {
+  border-bottom: 1px solid var(--ink);
+  display: flex; align-items: stretch;
+  background: var(--bg-panel);
+}
+.tb-brand {
+  padding: 10px 16px; border-right: 1px solid var(--ink);
+  display: flex; align-items: center;
+}
+.tb-brand-name { font-family: var(--cond); font-weight: 700; font-size: 17px; letter-spacing: .02em; }
+.tb-brand-name em { color: var(--hook); font-style: normal; }
+.tb-session {
+  padding: 10px 16px; border-right: 1px solid var(--rule);
+  display: flex; flex-direction: column; justify-content: center; gap: 1px;
+}
+.tb-session-label { font-family: var(--cond); font-size: 9px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; color: var(--muted); }
+.tb-session-val { font-size: 11px; font-weight: 500; }
+.tb-watchers {
+  padding: 10px 16px; display: flex; align-items: center; gap: 8px;
+  border-right: 1px solid var(--rule);
+}
+.tb-watcher-label { font-family: var(--cond); font-size: 9px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
+.wpill {
+  display: flex; align-items: center; gap: 4px;
+  padding: 2px 7px; border: 1px solid var(--rule); background: var(--bg);
+}
+.wpill-dot { width: 5px; height: 5px; background: var(--match); flex-shrink: 0; }
+.wpill-dot.off { background: var(--dim); }
+.wpill-name { font-size: 10px; }
+.wpill-name.off { color: var(--muted); }
+.wpill-n { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 2px; }
+.tb-live {
+  margin-left: auto; padding: 10px 16px; border-left: 1px solid var(--rule);
+  display: flex; align-items: center; gap: 6px;
+}
+.live-dot { width: 7px; height: 7px; background: var(--alarm); animation: blink 1.1s ease-in-out infinite; }
+.live-dot.paused { background: var(--muted); animation: none; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.15} }
+.live-text { font-family: var(--cond); font-weight: 600; font-size: 11px; letter-spacing: .1em; color: var(--alarm); }
+.live-text.paused { color: var(--muted); }
+
+/* ── Stats strip ── */
+.statsstrip { border-bottom: 1px solid var(--ink); display: flex; align-items: stretch; background: var(--bg-panel); }
+.stat { flex: 1; padding: 10px 20px; border-right: 1px solid var(--rule); display: flex; flex-direction: column; gap: 1px; }
+.stat:last-child { border-right: none; }
+.stat-label { font-family: var(--cond); font-size: 9px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
+.stat-num { font-family: var(--cond); font-weight: 700; font-size: 34px; line-height: 1; font-variant-numeric: tabular-nums; }
+.stat-num.blue   { color: var(--hook); }
+.stat-num.orange { color: var(--embok); }
+.stat-num.violet { color: var(--ref); }
+.stat-sub { font-size: 9px; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+/* ── Filter bar ── */
+.filterbar {
+  border-bottom: 1px solid var(--rule);
+  display: flex; align-items: center; gap: 0;
+  background: var(--bg-panel); height: 36px;
+}
+.filter-search {
+  flex: 1; height: 100%;
+  border: none; border-right: 1px solid var(--rule);
+  background: transparent; outline: none;
+  font-family: var(--mono); font-size: 11px; color: var(--ink);
+  padding: 0 14px;
+}
+.filter-search::placeholder { color: var(--dim); }
+.filter-search:focus { background: #fffff8; }
+
+.time-range-group { display: flex; align-items: stretch; border-right: 1px solid var(--rule); }
+.tr-btn {
+  height: 100%; padding: 0 12px;
+  border: none; border-right: 1px solid var(--rule); background: transparent;
+  font-family: var(--cond); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); cursor: pointer;
+}
+.tr-btn:last-child { border-right: none; }
+.tr-btn.active { background: var(--ink); color: var(--bg); }
+.tr-btn:hover:not(.active) { background: var(--bg-row); }
+
+.type-filter-group { display: flex; align-items: stretch; border-right: 1px solid var(--rule); }
+.tf-btn {
+  height: 100%; padding: 0 11px;
+  border: none; border-right: 1px solid var(--rule); background: transparent;
+  font-family: var(--cond); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  cursor: pointer; color: var(--muted);
+}
+.tf-btn:last-child { border-right: none; }
+.tf-btn.active { color: var(--bg-panel); }
+.tf-btn.f-hook.active   { background: var(--hook); }
+.tf-btn.f-match.active  { background: var(--match); }
+.tf-btn.f-saved.active  { background: var(--saved); }
+.tf-btn.f-embed.active  { background: var(--embok); }
+.tf-btn.f-ref.active    { background: var(--ref); }
+
+.pause-btn {
+  height: 100%; padding: 0 14px;
+  border: none; background: transparent;
+  font-family: var(--cond); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  cursor: pointer; color: var(--muted);
+}
+.pause-btn:hover { background: var(--bg-row); color: var(--ink); }
+.pause-btn.paused { color: var(--alarm); }
+
+/* ── Body ── */
+.body { display: grid; grid-template-columns: 148px 1fr 218px; overflow: hidden; }
+
+/* ── Sidebar ── */
+.sidebar { border-right: 1px solid var(--ink); background: var(--bg-panel); display: flex; flex-direction: column; overflow: hidden; }
+.sb-head { padding: 10px 12px 6px; font-family: var(--cond); font-size: 9px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--rule); }
+.sess-row { display: flex; align-items: center; padding: 7px 12px; gap: 6px; border-left: 2px solid transparent; border-bottom: 1px solid var(--rule); cursor: pointer; }
+.sess-row:hover { background: var(--bg-row); }
+.sess-row.active { border-left-color: var(--hook); }
+.sess-row.active .sess-name { color: var(--hook); font-weight: 500; }
+.sess-name { font-size: 11px; }
+.sess-n { margin-left: auto; font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sess-row.idle .sess-name { color: var(--muted); }
+
+/* ── Feed ── */
+.feed-col { display: flex; flex-direction: column; overflow: hidden; }
+.feed-meta { border-bottom: 1px solid var(--rule); padding: 0 14px; height: 28px; display: flex; align-items: center; background: var(--bg-panel); }
+.feed-count { font-size: 10px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.feed-showing { margin-left: 8px; font-size: 10px; color: var(--muted); }
+.feed-no-results { padding: 24px 14px; font-size: 11px; color: var(--muted); font-family: var(--cond); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+
+.feed { flex: 1; overflow-y: auto; background: var(--bg); }
+.feed::-webkit-scrollbar { width: 3px; }
+.feed::-webkit-scrollbar-thumb { background: var(--dim); }
+
+.ev {
+  display: flex; align-items: baseline;
+  border-bottom: 1px solid var(--rule);
+  padding: 5px 0; gap: 0;
+}
+.ev.hidden { display: none; }
+.ev:hover { background: var(--bg-row); }
+.ev-ts { font-size: 10px; color: var(--dim); padding: 0 10px; width: 72px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.ev-badge { font-family: var(--cond); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; width: 148px; flex-shrink: 0; padding-right: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev-badge.hook    { color: var(--hook); }
+.ev-badge.match   { color: var(--match); }
+.ev-badge.skip    { color: var(--skip); }
+.ev-badge.saved   { color: var(--saved); }
+.ev-badge.embok   { color: var(--embok); }
+.ev-badge.embfail { color: var(--embfail); }
+.ev-badge.ref     { color: var(--ref); }
+.ev-detail { font-size: 10px; color: var(--muted); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 14px; }
+.ev-detail .hi  { color: var(--ink); }
+.ev-detail .ok  { color: var(--match); }
+.ev-detail .err { color: var(--embfail); }
+.ev-detail .wrn { color: var(--embok); }
+.ev-detail .lo  { color: var(--dim); }
+
+/* search match highlight */
+mark { background: #ffe066; color: var(--ink); border-radius: 1px; padding: 0 1px; }
+
+/* ── Episodes ── */
+.ep-col { border-left: 1px solid var(--ink); display: flex; flex-direction: column; overflow: hidden; background: var(--bg-panel); }
+.ep-bar { border-bottom: 1px solid var(--rule); padding: 0 12px; height: 28px; display: flex; align-items: center; font-family: var(--cond); font-size: 9px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); flex-shrink: 0; }
+.ep-list { flex: 1; overflow-y: auto; }
+.ep-list::-webkit-scrollbar { width: 3px; }
+.ep-list::-webkit-scrollbar-thumb { background: var(--dim); }
+.ep-card { padding: 8px 12px; border-bottom: 1px solid var(--rule); display: flex; flex-direction: column; gap: 4px; }
+.ep-card:hover { background: var(--bg-row); }
+.ep-top { display: flex; align-items: center; gap: 6px; }
+.ep-tag { font-family: var(--cond); font-weight: 700; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; padding: 1px 5px; border: 1px solid currentColor; flex-shrink: 0; }
+.ep-tag.l0 { color: var(--hook); }
+.ep-tag.l1 { color: var(--ref); }
+.ep-tag.l2 { color: var(--saved); }
+.ep-tag.l3 { color: var(--match); }
+.ep-cat { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ep-meta { display: flex; gap: 8px; font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ep-imp { color: var(--embok); }
+.ep-emb { color: var(--match); }
+.ep-emb.no { color: var(--embfail); }
+.ep-time { margin-left: auto; color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="tb-brand">
+      <span class="tb-brand-name">CRISP<em>.</em>MONITOR</span>
+    </div>
+    <div class="tb-session">
+      <span class="tb-session-label">Session</span>
+      <span class="tb-session-val" id="session-label">connecting...</span>
+    </div>
+    <div class="tb-watchers">
+      <span class="tb-watcher-label">Watchers</span>
+      <div class="wpill"><div class="wpill-dot" id="wd-git"></div><span class="wpill-name">Git</span><span class="wpill-n" id="wn-git">0</span></div>
+      <div class="wpill"><div class="wpill-dot" id="wd-file"></div><span class="wpill-name">FileChange</span><span class="wpill-n" id="wn-file">0</span></div>
+      <div class="wpill"><div class="wpill-dot off" id="wd-bash"></div><span class="wpill-name off" id="wl-bash">Bash</span><span class="wpill-n" id="wn-bash">0</span></div>
+    </div>
+    <div class="tb-live">
+      <div class="live-dot" id="live-dot"></div>
+      <span class="live-text" id="live-text">LIVE</span>
+    </div>
+  </div>
+
+  <!-- Stats strip -->
+  <div class="statsstrip">
+    <div class="stat">
+      <span class="stat-label">Events / min</span>
+      <span class="stat-num blue" id="s-epm">0</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Episodes</span>
+      <span class="stat-num" id="s-eps">0</span>
+      <span class="stat-sub">this session</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Embed OK</span>
+      <span class="stat-num orange" id="s-emb">--</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Total events</span>
+      <span class="stat-num" id="s-tot">0</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Agent</span>
+      <span class="stat-num" style="font-size:22px;padding-top:4px" id="s-agent">--</span>
+    </div>
+  </div>
+
+  <!-- Filter bar -->
+  <div class="filterbar">
+    <input class="filter-search" id="search" type="text" placeholder="filter events...  e.g. GitWatcher, embed_fail, huh">
+
+    <div class="time-range-group">
+      <button class="tr-btn active" data-range="0">All</button>
+      <button class="tr-btn" data-range="60">1m</button>
+      <button class="tr-btn" data-range="300">5m</button>
+      <button class="tr-btn" data-range="900">15m</button>
+      <button class="tr-btn" data-range="3600">1h</button>
+    </div>
+
+    <div class="type-filter-group">
+      <button class="tf-btn f-hook  active" data-type="hook">hook</button>
+      <button class="tf-btn f-match active" data-type="match">watcher</button>
+      <button class="tf-btn f-saved active" data-type="saved">episode</button>
+      <button class="tf-btn f-embed active" data-type="embed">embed</button>
+      <button class="tf-btn f-ref   active" data-type="ref">reflect</button>
+    </div>
+
+    <button class="pause-btn" id="pause-btn">&#9646;&#9646; Pause</button>
+  </div>
+
+  <!-- Body -->
+  <div class="body">
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <div class="sb-head">Sessions</div>
+      <div id="session-list"></div>
+    </div>
+
+    <!-- Feed -->
+    <div class="feed-col">
+      <div class="feed-meta">
+        <span class="feed-count" id="feed-count">0 events</span>
+        <span class="feed-showing" id="feed-showing"></span>
+      </div>
+      <div class="feed" id="feed">
+        <div class="feed-no-results" id="no-results" style="display:none">No matching events</div>
+      </div>
+    </div>
+
+    <!-- Episodes panel -->
+    <div class="ep-col">
+      <div class="ep-bar">Recent episodes</div>
+      <div class="ep-list" id="ep-list"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let paused = false;
+let searchText = '';
+let activeRange = 0;        // seconds; 0 = all
+let activeTypes = new Set(['hook','match','saved','embed','ref']);
+let lastEventId = 0;
+let pollInterval = null;
+
+let totalEv = 0, totalEps = 0, embedOk = 0, embedTotal = 0;
+let wGit = 0, wFile = 0, wBash = 0;
+const epmWin = [];
+
+// Map type-filter key -> badge classes
+const typeToClasses = {
+  hook:  ['hook'],
+  match: ['match','skip'],
+  saved: ['saved'],
+  embed: ['embok','embfail'],
+  ref:   ['ref'],
+};
+const badgeToType = {};
+for (const [t, classes] of Object.entries(typeToClasses))
+  classes.forEach(c => { badgeToType[c] = t; });
+
+// ── Polling ────────────────────────────────────────────────────────────────
+async function poll() {
+  if (paused) return;
+  try {
+    const res = await fetch(`/api/events?since=${lastEventId}&limit=100`);
+    if (!res.ok) return;
+    const events = await res.json();
+    events.forEach(e => ingestEvent(e));
+  } catch (_) {}
+}
+
+// ── Ingest a single event from the server ─────────────────────────────────
+function ingestEvent(e) {
+  if (e.id > lastEventId) lastEventId = e.id;
+  totalEv++;
+  epmWin.push(Date.now());
+
+  const p = e.payload || {};
+  updateStats(e, p);
+  updateWatchers(e, p);
+  addRow(e, p);
+  updateSessionList(p.session_id || p.session, p.project || e.project);
+}
+
+function updateStats(e, p) {
+  document.getElementById('s-tot').textContent = totalEv;
+  if (e.event === 'episode_saved') {
+    totalEps++;
+    document.getElementById('s-eps').textContent = totalEps;
+  }
+  if (e.event === 'embed_result') {
+    embedTotal++;
+    if (p.success) { embedOk++; }
+    document.getElementById('s-emb').textContent = Math.round(embedOk/embedTotal*100)+'%';
+  }
+  if (e.agent || p.agent) document.getElementById('s-agent').textContent = e.agent || p.agent;
+  if (e.session || p.session_id) {
+    document.getElementById('session-label').textContent =
+      (p.project || e.project || '?') + ' / ' + (e.session || p.session_id || '?').slice(0,7);
+  }
+  // epm
+  const now = Date.now();
+  while (epmWin.length && epmWin[0] < now - 60000) epmWin.shift();
+  document.getElementById('s-epm').textContent = epmWin.length;
+}
+
+function updateWatchers(e, p) {
+  if (e.event !== 'watcher_matched') return;
+  const n = (p.watcher_name || '').toLowerCase();
+  if (n.includes('git'))  { wGit++;  document.getElementById('wn-git').textContent  = wGit; }
+  if (n.includes('file')) { wFile++; document.getElementById('wn-file').textContent = wFile; }
+  if (n.includes('bash')) { wBash++; document.getElementById('wn-bash').textContent = wBash; wBashActive(); }
+}
+function wBashActive() {
+  document.getElementById('wd-bash').classList.remove('off');
+  document.getElementById('wl-bash').classList.remove('off');
+}
+
+const sessions = {};
+function updateSessionList(sid, project) {
+  if (!sid) return;
+  const key = sid;
+  if (!sessions[key]) {
+    sessions[key] = { project: project || sid, count: 0, el: null };
+    const el = document.createElement('div');
+    el.className = 'sess-row' + (Object.keys(sessions).length === 1 ? ' active' : '');
+    sessions[key].el = el;
+    document.getElementById('session-list').appendChild(el);
+  }
+  sessions[key].count++;
+  const s = sessions[key];
+  s.el.innerHTML = `<span class="sess-name">${s.project.split('/').pop()}</span><span class="sess-n">${s.count}</span>`;
+}
+
+// ── Badge class from event name ────────────────────────────────────────────
+function eventBadge(name) {
+  const n = name || '';
+  if (n === 'hook_fired')       return ['hook', 'hook_fired'];
+  if (n === 'watcher_matched')  return ['match', 'watcher_match'];
+  if (n === 'watcher_skipped')  return ['skip', 'watcher_skip'];
+  if (n === 'episode_saved')    return ['saved', 'episode_saved'];
+  if (n === 'embed_result')     return ['embok', 'embed_ok'];  // overridden below
+  if (n === 'reflect_ran')      return ['ref', 'reflect_ran'];
+  return ['skip', n];
+}
+
+function buildDetail(e, p) {
+  const parts = [];
+  if (p.event_type)    parts.push(`<span class="hi">${esc(p.event_type)}</span>`);
+  if (p.tool_name)     parts.push(`<span class="hi">${esc(p.tool_name)}</span>`);
+  if (p.watcher_name)  parts.push(`<span class="hi">${esc(p.watcher_name)}</span>`);
+  if (p.agent)         parts.push(esc(p.agent));
+  if (p.provider)      parts.push(esc(p.provider));
+  if (p.success === true)  parts.push('<span class="ok">OK</span>');
+  if (p.success === false) parts.push('<span class="err">FAIL</span>');
+  if (p.fallback_used) parts.push('<span class="wrn">fallback</span>');
+  if (p.id)            parts.push(`<span class="hi">${esc(p.id)}</span>`);
+  if (p.layer !== undefined) parts.push(`L${p.layer}`);
+  if (p.category)      parts.push(esc(p.category));
+  if (p.importance)    parts.push(`imp=<span class="wrn">${p.importance}</span>`);
+  if (p.l0_in !== undefined) parts.push(`l0_in=<span class="hi">${p.l0_in}</span>`);
+  if (p.l1_created)    parts.push(`l1=<span class="ok">${p.l1_created}</span>`);
+  if (p.project)       parts.push(`<span class="lo">${esc(p.project.split('/').pop())}</span>`);
+  return parts.join(' · ');
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Add a row to the DOM ───────────────────────────────────────────────────
+function addRow(e, p) {
+  let [cls, label] = eventBadge(e.event);
+  if (e.event === 'embed_result' && p.success === false) cls = 'embfail';
+  if (e.event === 'embed_result' && p.success === false) label = 'embed_fail';
+
+  const typeKey = badgeToType[cls] || 'hook';
+  const tsMs = new Date(e.ts).getTime();
+  const detail = buildDetail(e, p);
+  const rawText = `${label} ${detail}`.replace(/<[^>]+>/g,' ');
+
+  const row = document.createElement('div');
+  row.className = 'ev';
+  row.dataset.type = typeKey;
+  row.dataset.ts = tsMs;
+  row.dataset.raw = rawText.toLowerCase();
+  row.innerHTML = `<span class="ev-ts">${fmtTs(e.ts)}</span><span class="ev-badge ${cls}">${label}</span><span class="ev-detail">${detail}</span>`;
+
+  document.getElementById('feed').insertBefore(row, document.getElementById('no-results'));
+  applyFilter(row);
+  updateFilterCount();
+}
+
+function fmtTs(iso) {
+  try { return new Date(iso).toLocaleTimeString('en-GB', {hour12:false}); }
+  catch(_) { return iso || '--'; }
+}
+
+// ── Filtering ──────────────────────────────────────────────────────────────
+function applyFilter(row) {
+  const ts = parseInt(row.dataset.ts, 10);
+  const type = row.dataset.type;
+  const raw = row.dataset.raw;
+  const now = Date.now();
+
+  const inRange = activeRange === 0 || (now - ts) <= activeRange * 1000;
+  const inType  = activeTypes.has(type);
+  const inSearch = !searchText || raw.includes(searchText);
+
+  row.classList.toggle('hidden', !(inRange && inType && inSearch));
+}
+
+function applyAllFilters() {
+  document.querySelectorAll('#feed .ev').forEach(applyFilter);
+  updateFilterCount();
+  autoScroll();
+}
+
+function updateFilterCount() {
+  const total = document.querySelectorAll('#feed .ev').length;
+  const shown = document.querySelectorAll('#feed .ev:not(.hidden)').length;
+  document.getElementById('feed-count').textContent = total + ' events';
+  document.getElementById('feed-showing').textContent =
+    shown < total ? `(showing ${shown})` : '';
+  document.getElementById('no-results').style.display = shown === 0 ? 'block' : 'none';
+}
+
+function autoScroll() {
+  if (paused) return;
+  const f = document.getElementById('feed');
+  f.scrollTop = f.scrollHeight;
+}
+
+// ── UI controls ───────────────────────────────────────────────────────────
+document.getElementById('search').addEventListener('input', function() {
+  searchText = this.value.trim().toLowerCase();
+  applyAllFilters();
+});
+
+document.querySelectorAll('.tr-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('.tr-btn').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    activeRange = parseInt(this.dataset.range, 10);
+    applyAllFilters();
+  });
+});
+
+document.querySelectorAll('.tf-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    const t = this.dataset.type;
+    if (activeTypes.has(t)) {
+      if (activeTypes.size === 1) return; // keep at least one
+      activeTypes.delete(t);
+      this.classList.remove('active');
+    } else {
+      activeTypes.add(t);
+      this.classList.add('active');
+    }
+    applyAllFilters();
+  });
+});
+
+const pauseBtn = document.getElementById('pause-btn');
+pauseBtn.addEventListener('click', function() {
+  paused = !paused;
+  this.textContent = paused ? '▶ Resume' : '❚❚ Pause';
+  this.classList.toggle('paused', paused);
+  document.getElementById('live-dot').classList.toggle('paused', paused);
+  document.getElementById('live-text').textContent = paused ? 'PAUSED' : 'LIVE';
+  document.getElementById('live-text').classList.toggle('paused', paused);
+  if (!paused) autoScroll();
+});
+
+// ── Start polling ──────────────────────────────────────────────────────────
+pollInterval = setInterval(poll, 500);
+poll();
+</script>
+</body>
+</html>

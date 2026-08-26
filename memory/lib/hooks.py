@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from lib.bus import emit as _bus_emit
 from lib.code_index import CodeAnalyzer
 from lib.store import MemoryEpisode, MemoryStore, is_code_index_category
 from lib.lang_detect import is_source_extension
@@ -54,6 +55,18 @@ class MemoryHookHandler:
             bool(episode.embedding),
             extra={"session_id": episode.session_id, "project": "-"},
         )
+        try:
+            _bus_emit("episode_saved", {
+                "id": episode.id,
+                "layer": episode.layer,
+                "category": episode.category,
+                "importance": round(episode.importance, 3),
+                "embedded": bool(episode.embedding),
+                "session_id": episode.session_id,
+                "project": getattr(self.store, "project_root", "-"),
+            })
+        except Exception:
+            pass
         return ok
 
     def _embed(self, episode: MemoryEpisode) -> None:
@@ -80,6 +93,15 @@ class MemoryHookHandler:
             if text:
                 try:
                     episode.embedding = self._embed_provider.embed(text)
+                    try:
+                        _bus_emit("embed_result", {
+                            "episode_id": episode.id,
+                            "provider": type(self._embed_provider).__name__,
+                            "success": True, "fallback_used": False,
+                            "session_id": episode.session_id,
+                        })
+                    except Exception:
+                        pass
                 except Exception as per_call_exc:
                     # Per-call failure (e.g. Ollama 500): fall back to HF or word2vec.
                     _log.warning(
@@ -95,6 +117,15 @@ class MemoryHookHandler:
                         fallback = _hf_then_w2v(merged)
                         episode.embedding = fallback.embed(text)
                         self._embed_provider = fallback  # promote so next call uses it
+                        try:
+                            _bus_emit("embed_result", {
+                                "episode_id": episode.id,
+                                "provider": type(fallback).__name__,
+                                "success": True, "fallback_used": True,
+                                "session_id": episode.session_id,
+                            })
+                        except Exception:
+                            pass
                     except Exception as fb_exc:
                         _log.warning(
                             "embed fallback also failed for %s: %s", episode.id, fb_exc,
@@ -893,6 +924,17 @@ def main():
     except ValueError as e:
         print(json.dumps({"status": "ignored", "reason": str(e)}))
         return
+
+    try:
+        _bus_emit("hook_fired", {
+            "agent": event.agent,
+            "event_type": event.event_type,
+            "tool_name": event.tool_name or "",
+            "session_id": event.session_id,
+            "project": event.project_root,
+        })
+    except Exception:
+        pass
 
     try:
         store = get_memory_store(event.project_root) if event.project_root else get_memory_store()

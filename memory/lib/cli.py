@@ -997,6 +997,12 @@ def cmd_observe(args):
     sys.exit(0)
 
 
+def cmd_monitor(args):
+    """Launch the real-time observability web dashboard."""
+    from lib.monitor.server import run
+    run(host=args.host, port=args.port)
+
+
 def cmd_instinct(args):
     """Inspect and manage continuous-learning instincts."""
     from lib.instincts import InstinctEngine
@@ -1233,6 +1239,10 @@ def main():
     ip = inst_sub.add_parser("promote", help="Promote an instinct project->global")
     ip.add_argument("id")
 
+    mon_parser = subparsers.add_parser("monitor", help="Real-time observability web dashboard")
+    mon_parser.add_argument("--port", type=int, default=7654, help="HTTP port (default: 7654)")
+    mon_parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1273,6 +1283,7 @@ def main():
         "switch": cmd_switch,
         "observe": cmd_observe,
         "instinct": cmd_instinct,
+        "monitor": cmd_monitor,
     }
 
     _log.info("cmd=%s", args.command, extra={"session_id": "-", "project": "-"})

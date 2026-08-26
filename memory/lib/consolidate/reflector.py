@@ -5,6 +5,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..bus import emit as _bus_emit
 from ..code_index import CodeAnalyzer
 from ..store import MemoryEpisode, MemoryStore
 from ..time_utils import now_iso, parse_ts
@@ -374,5 +375,15 @@ class MemoryReflector:
             if l3:
                 self.store.save_episode(l3)
                 result["l3_created"] += 1
+
+        try:
+            _bus_emit("reflect_ran", {
+                "l0_in": len(l0_episodes),
+                "l1_created": result["l1_created"],
+                "l2_created": result["l2_created"],
+                "l3_created": result["l3_created"],
+            })
+        except Exception:
+            pass
 
         return result

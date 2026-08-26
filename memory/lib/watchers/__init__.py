@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+from lib.bus import emit as _bus_emit
 from lib.log import get_logger
 from lib.store import MemoryEpisode, MemoryStore
 from lib.watchers.base import ToolWatcher
@@ -85,6 +86,8 @@ class WatcherRegistry:
                 continue
             try:
                 if not watcher.matches(tool_name, inp, out):
+                    _bus_emit("watcher_skipped", {"watcher_name": watcher.name, "tool_name": tool_name,
+                                              "session_id": session_id, "project": project_root})
                     continue
             except Exception as e:
                 _log.warning("watcher %s.matches() failed: %s", watcher.name, e, extra={})
@@ -112,5 +115,10 @@ class WatcherRegistry:
                     watcher.name, tool_name, len(eps), saved,
                     extra={"session_id": session_id, "project": project_root},
                 )
+                _bus_emit("watcher_matched", {
+                    "watcher_name": watcher.name, "tool_name": tool_name,
+                    "episode_count": len(eps), "saved": saved,
+                    "session_id": session_id, "project": project_root,
+                })
 
         return {"watchers_matched": matched, "episodes_saved": total_eps}
