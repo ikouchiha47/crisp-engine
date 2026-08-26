@@ -385,7 +385,7 @@ function ingestEvent(e) {
   updateStats(e, p);
   updateWatchers(e, p);
   addRow(e, p);
-  updateSessionList(p.session_id || p.session, p.project || e.project);
+  updateSessionList(e.session || p.session_id || p.session, e.project || p.project);
 }
 
 function updateStats(e, p) {
@@ -427,7 +427,9 @@ function updateSessionList(sid, project) {
   if (!sid) return;
   const key = sid;
   if (!sessions[key]) {
-    sessions[key] = { project: project || sid, count: 0, el: null };
+    // resolve a display name: ignore "-" placeholder, take last real path segment
+    const proj = (project && project !== '-') ? project.split('/').filter(Boolean).pop() : sid.slice(0, 7);
+    sessions[key] = { project: proj, count: 0, el: null };
     const el = document.createElement('div');
     el.className = 'sess-row' + (Object.keys(sessions).length === 1 ? ' active' : '');
     sessions[key].el = el;
@@ -435,7 +437,7 @@ function updateSessionList(sid, project) {
   }
   sessions[key].count++;
   const s = sessions[key];
-  s.el.innerHTML = `<span class="sess-name">${s.project.split('/').pop()}</span><span class="sess-n">${s.count}</span>`;
+  s.el.innerHTML = `<span class="sess-name">${esc(s.project)}</span><span class="sess-n">${s.count}</span>`;
 }
 
 // ── Badge class from event name ────────────────────────────────────────────
