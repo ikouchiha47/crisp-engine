@@ -8,19 +8,20 @@
  *   2. Add "crisp-memory" to the "plugin" array in ~/.config/opencode/opencode.jsonc
  *   3. Ensure crisp-hook is on PATH: pip install crisp-engine
  *
- * Limitations vs Claude Code:
- *   - No session_start / session_end hooks in OpenCode plugin API
- *   - tool.execute.after output is a single string (no stdout/stderr split)
- *   - session.compacting is experimental and may not fire in all cases
- *
  * Hook coverage:
- *   tool.execute.after     → crisp-hook opencode-post-tool   (PostToolUse equivalent)
- *   tool.execute.before    → crisp-hook opencode-pre-tool    (PreToolUse equivalent)
- *   experimental.session.compacting → crisp-hook opencode-pre-compact
+ *   experimental.chat.system.transform  → inject instincts into system prompt
+ *   tool.execute.before                 → crisp-hook opencode-pre-tool
+ *   tool.execute.after                  → crisp-hook opencode-post-tool
+ *   experimental.session.compacting     → crisp-hook opencode-pre-compact
+ *
+ * Limitations vs Claude Code:
+ *   - tool.execute.before only receives tool name + sessionID, not args.
+ *     Per-file episodic memory injection is done post-tool instead.
+ *   - system.transform fires per-message, so we cache the instinct block.
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
-import { execSync } from "node:child_process"
+import { execSync, spawnSync } from "node:child_process"
 
 function send(event: string, payload: object): void {
   try {
@@ -35,16 +36,58 @@ function send(event: string, payload: object): void {
   }
 }
 
+/** Call crisp-hook and return stdout as parsed JSON, or null on failure. */
+function query(event: string, payload: object): any | null {
+  try {
+    const json = JSON.stringify(payload)
+    const result = spawnSync("crisp-hook", [event], {
+      input: json,
+      timeout: 5000,
+      encoding: "utf8",
+    })
+    if (result.status === 0 && result.stdout) {
+      return JSON.parse(result.stdout)
+    }
+  } catch {}
+  return null
+}
+
 const plugin: Plugin = async (input) => {
-  const cwd = input.config.cwd ?? process.cwd()
+  const cwd = input.config?.cwd ?? process.cwd()
+
+  // Cache instinct block per session to avoid re-querying on every message.
+  // Invalidated when a new session_id appears.
+  let cachedSessionId = ""
+  let cachedInstincts = ""
+
+  function getInstincts(sessionID: string): string {
+    if (sessionID === cachedSessionId) return cachedInstincts
+    const result = query("opencode-get-instincts", { session_id: sessionID, cwd })
+    cachedInstincts = (result?.instinct_block as string) ?? ""
+    cachedSessionId = sessionID
+    return cachedInstincts
+  }
 
   return {
+    /**
+     * Inject instincts into the system prompt before every LLM call.
+     * output.system is string[] — we push our block if non-empty.
+     */
+    "experimental.chat.system.transform": async (hookInput, output) => {
+      // hookInput.sessionID is available in newer SDK versions; fall back gracefully.
+      const sessionID = (hookInput as any).sessionID ?? cachedSessionId
+      const block = getInstincts(sessionID)
+      if (block) {
+        output.system.push(block)
+      }
+    },
+
     "tool.execute.before": async (hookInput, _output) => {
       send("opencode-pre-tool", {
         session_id: hookInput.sessionID,
         cwd,
         tool_name: hookInput.tool,
-        tool_input: {},  // args not yet available in before hook
+        tool_input: {},  // args not available in before hook
       })
     },
 
@@ -54,8 +97,6 @@ const plugin: Plugin = async (input) => {
         cwd,
         tool_name: hookInput.tool,
         tool_input: hookInput.args ?? {},
-        // OpenCode gives a single output string, not split stdout/stderr.
-        // The adapter maps this to { stdout: output, exit_code: 0 }.
         output: hookOutput.output ?? "",
         metadata: hookOutput.metadata ?? {},
       })
@@ -65,7 +106,6 @@ const plugin: Plugin = async (input) => {
       send("opencode-pre-compact", {
         session_id: hookInput.sessionID ?? "unknown",
         cwd,
-        reason: hookInput.reason,
       })
     },
   }

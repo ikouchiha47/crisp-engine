@@ -145,47 +145,83 @@ class MemoryHookHandler:
 
     # ── Claude Code native translators ────────────────────────────────────────
 
+    def build_context_block(
+        self,
+        tool: str,
+        tool_input: Dict[str, Any],
+        session_id: str,
+    ) -> str:
+        """Build a memory context string for injection into any agent.
+
+        Returns empty string when nothing is worth injecting.
+        Two sections:
+          1. Instincts — L2 behavioural patterns relevant to this tool call,
+             always included when present (confidence >= 0.5).
+          2. Episodic memory — L0 code/conversation episodes for the file
+             being touched (Edit/Write/Read/MultiEdit only).
+        """
+        sections: list[str] = []
+
+        # ── 1. Instincts relevant to this tool call ────────────────────────
+        try:
+            all_eps = self.store.list_episodes()
+            tool_instincts = [
+                ep for ep in all_eps
+                if ep.layer == 2
+                and ep.category == "instinct"
+                and tool in (ep.tags or [])
+                and getattr(ep, "confidence", 0) >= 0.5
+            ]
+            if tool_instincts:
+                tool_instincts.sort(key=lambda e: getattr(e, "confidence", 0), reverse=True)
+                lines = ["[crisp instincts]"]
+                for ep in tool_instincts[:5]:
+                    conf = getattr(ep, "confidence", 0)
+                    lines.append(f"- {ep.content.strip()} (confidence {conf:.2f})")
+                sections.append("\n".join(lines))
+        except Exception:
+            pass
+
+        # ── 2. Episodic memory for the file being touched ──────────────────
+        file_path = tool_input.get("file_path", "")
+        if tool in ("Read", "Edit", "Write", "MultiEdit") and file_path:
+            try:
+                file_path_str = str(Path(file_path).resolve())
+                file_eps = [
+                    ep for ep in (all_eps if "all_eps" in dir() else self.store.list_episodes())
+                    if ep.source_path == file_path_str
+                    and is_code_index_category(ep.category)
+                    and "stale" not in (ep.tags or [])
+                ]
+                if file_eps:
+                    lines = [f"[crisp memory: {Path(file_path).name}]"]
+                    for ep in file_eps[:15]:
+                        first = ep.content.splitlines()[0] if ep.content else ""
+                        lines.append(f"- {ep.title or ep.id}: {first}"[:200])
+                    sections.append("\n".join(lines))
+            except Exception:
+                pass
+
+        return "\n\n".join(sections)
+
     def handle_claude_pre_tool_context(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """PreToolUse — inject existing memory for the file about to be
-        touched, so the agent has it before reading/editing rather than
-        needing to actively call `huh search` itself.
+        """PreToolUse for Claude Code — returns hookSpecificOutput.additionalContext.
 
-        Returns Claude Code's real hookSpecificOutput.additionalContext
-        shape directly (verified against the actual hook schema, not
-        guessed) — {} when there's nothing to inject, so main() can merge
-        this into the result unconditionally.
-
-        Scoped to code_element episodes only for now — chat-derived
-        (correction/instinct) episodes aren't reliably per-file yet
-        (ingest_bridge.py currently sets source_path to the project root,
-        not the specific file touched — a known, separately-tracked gap).
+        Claude Code reads this field and prepends it to the tool context
+        visible to the model. Returns {} when nothing to inject.
         """
         tool = data.get("tool_name", "")
         tool_input = data.get("tool_input", {})
-        file_path = tool_input.get("file_path", "")
+        session_id = data.get("session_id", "")
 
-        if tool not in ("Read", "Edit", "Write", "MultiEdit") or not file_path:
+        block = self.build_context_block(tool, tool_input, session_id)
+        if not block:
             return {}
-
-        file_path_str = str(Path(file_path).resolve())
-        episodes = [
-            ep for ep in self.store.list_episodes()
-            if ep.source_path == file_path_str
-            and is_code_index_category(ep.category)
-            and "stale" not in (ep.tags or [])
-        ]
-        if not episodes:
-            return {}
-
-        lines = [f"crisp memory for {Path(file_path).name}:"]
-        for ep in episodes[:20]:
-            first_line = ep.content.splitlines()[0] if ep.content else ""
-            lines.append(f"- {ep.title}: {first_line}"[:200])
 
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "additionalContext": "\n".join(lines),
+                "additionalContext": block,
             }
         }
 
@@ -1023,6 +1059,16 @@ def main():
 
         elif et == "pre_compact":
             result.update(handler.handle_claude_transcript(data, "PreCompact"))
+
+        # OpenCode system.transform query — return instinct block as JSON
+        elif et == "get_instincts":
+            block = handler.build_context_block(
+                tool=data.get("tool_name", ""),
+                tool_input=data.get("tool_input", {}),
+                session_id=data.get("session_id", ""),
+            )
+            result["instinct_block"] = block
+            result["status"] = "ok"
 
         # Internal-only event types
         elif et == "file_change":

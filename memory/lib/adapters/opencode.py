@@ -17,11 +17,13 @@ since the watcher layer matches on "Bash", "Write", etc.
 from lib.adapters.base import NormalizedEvent
 
 _EVENT_MAP = {
-    "opencode-session-start": "session_start",
-    "opencode-post-tool":     "post_tool",
-    "opencode-stop":          "stop",
-    "opencode-session-end":   "session_end",
-    "opencode-pre-compact":   "pre_compact",
+    "opencode-session-start":  "session_start",
+    "opencode-pre-tool":       "pre_tool",
+    "opencode-post-tool":      "post_tool",
+    "opencode-stop":           "stop",
+    "opencode-session-end":    "session_end",
+    "opencode-pre-compact":    "pre_compact",
+    "opencode-get-instincts":  "get_instincts",  # OpenCode system.transform query
 }
 
 _TOOL_NAME_MAP = {
