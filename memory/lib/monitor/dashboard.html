@@ -199,6 +199,21 @@ html, body { height: 100%; background: var(--bg); color: var(--ink); font-family
 /* search match highlight */
 mark { background: #ffe066; color: var(--ink); border-radius: 1px; padding: 0 1px; }
 
+/* ── Scroll-to-bottom FAB ── */
+#scroll-fab {
+  position: fixed; bottom: 20px; right: 232px;
+  width: 32px; height: 32px;
+  background: var(--ink); color: var(--bg);
+  border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; line-height: 1;
+  opacity: 0; pointer-events: none;
+  transition: opacity .15s;
+  z-index: 100;
+}
+#scroll-fab.visible { opacity: 1; pointer-events: all; }
+#scroll-fab:hover { background: var(--hook); }
+
 /* ── Episodes ── */
 .ep-col { border-left: 1px solid var(--ink); display: flex; flex-direction: column; overflow: hidden; background: var(--bg-panel); }
 .ep-bar { border-bottom: 1px solid var(--rule); padding: 0 12px; height: 28px; display: flex; align-items: center; font-family: var(--cond); font-size: 9px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); flex-shrink: 0; }
@@ -321,6 +336,8 @@ mark { background: #ffe066; color: var(--ink); border-radius: 1px; padding: 0 1p
 
   </div>
 </div>
+
+<button id="scroll-fab" title="Jump to latest">&#8595;</button>
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
@@ -559,6 +576,20 @@ pauseBtn.addEventListener('click', function() {
   document.getElementById('live-text').textContent = paused ? 'PAUSED' : 'LIVE';
   document.getElementById('live-text').classList.toggle('paused', paused);
   if (!paused) autoScroll();
+});
+
+// ── Scroll-to-bottom FAB ──────────────────────────────────────────────────
+const fab = document.getElementById('scroll-fab');
+const feedEl = document.getElementById('feed');
+
+feedEl.addEventListener('scroll', function() {
+  const atBottom = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 40;
+  fab.classList.toggle('visible', !atBottom);
+});
+
+fab.addEventListener('click', function() {
+  feedEl.scrollTop = feedEl.scrollHeight;
+  fab.classList.remove('visible');
 });
 
 // ── Start polling ──────────────────────────────────────────────────────────
