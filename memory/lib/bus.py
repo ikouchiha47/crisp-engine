@@ -9,8 +9,8 @@ dropped from the full deque -- same behaviour as statsd UDP loss. The hook
 path is never blocked.
 
 Usage:
-    from lib.bus import emit
-    emit("episode_saved", {"id": ep.id, "layer": ep.layer})
+    from lib.bus import emit, HookFired, EpisodeSaved
+    emit(HookFired(session_id=sid, project=cwd, event_type="post_tool", tool_name="Edit", agent="claude_code"))
 
 Clients tail with:
     from lib.bus import tail
@@ -24,9 +24,10 @@ import json
 import logging
 import sqlite3
 import threading
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 _log = logging.getLogger("crisp.bus")
 
@@ -37,23 +38,91 @@ _KEEP_ROWS = 50_000
 _KEEP_DAYS = 7
 
 _deque: collections.deque = collections.deque(maxlen=_RING_SIZE)
-_lock = threading.Lock()   # protects _deque reads in the flusher only
+_lock = threading.Lock()
 _thread: threading.Thread | None = None
 _thread_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Event types  (session_id + project are required on every event)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HookFired:
+    session_id: str
+    project: str
+    event_type: str       # pre_tool / post_tool / session_start / etc.
+    tool_name: str = ""
+    agent: str = ""
+    _event: str = field(default="hook_fired", init=False, repr=False)
+
+
+@dataclass
+class WatcherMatched:
+    session_id: str
+    project: str
+    watcher_name: str
+    episode_count: int = 0
+    _event: str = field(default="watcher_matched", init=False, repr=False)
+
+
+@dataclass
+class WatcherSkipped:
+    session_id: str
+    project: str
+    watcher_name: str
+    _event: str = field(default="watcher_skipped", init=False, repr=False)
+
+
+@dataclass
+class EpisodeSaved:
+    session_id: str
+    project: str
+    id: str
+    layer: int
+    category: str
+    importance: float
+    embedded: bool = False
+    _event: str = field(default="episode_saved", init=False, repr=False)
+
+
+@dataclass
+class EmbedResult:
+    session_id: str
+    project: str
+    episode_id: str
+    provider: str
+    success: bool
+    fallback_used: bool = False
+    _event: str = field(default="embed_result", init=False, repr=False)
+
+
+@dataclass
+class ReflectRan:
+    l0_in: int
+    session_id: str = ""
+    project: str = ""
+    l1_created: int = 0
+    l2_created: int = 0
+    l3_created: int = 0
+    _event: str = field(default="reflect_ran", init=False, repr=False)
+
+
+BusEvent = HookFired | WatcherMatched | WatcherSkipped | EpisodeSaved | EmbedResult | ReflectRan
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def emit(event: str, payload: dict[str, Any] | None = None, **kwargs) -> None:
-    """Append an event to the ring buffer. Never blocks, never raises."""
+def emit(ev: BusEvent) -> None:
+    """Append a typed event to the ring buffer. Never blocks, never raises."""
     try:
         ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-        data = payload or {}
-        if kwargs:
-            data = {**data, **kwargs}
-        _deque.append((ts, event, json.dumps(data, default=str)))
+        d = asdict(ev)
+        d.pop("_event", None)
+        event_name = ev._event  # type: ignore[attr-defined]
+        _deque.append((ts, event_name, json.dumps(d, default=str)))
         _ensure_thread()
     except Exception:
         pass
@@ -126,7 +195,6 @@ def _flush_once(con: sqlite3.Connection) -> None:
     if not _deque:
         return
     batch = []
-    # drain without holding the GIL for long
     try:
         while True:
             batch.append(_deque.popleft())
@@ -202,9 +270,7 @@ def _housekeep(con: sqlite3.Connection) -> None:
         cutoff_ts = datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
         ).isoformat()
-        # keep last 7 days
         con.execute("DELETE FROM events WHERE ts < datetime(?, '-7 days')", (cutoff_ts,))
-        # keep last 50k rows
         con.execute("""
             DELETE FROM events WHERE id <= (
                 SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET 50000
