@@ -166,10 +166,20 @@ html, body { height: 100%; background: var(--bg); color: var(--ink); font-family
 .ev {
   display: flex; align-items: baseline;
   border-bottom: 1px solid var(--rule);
+  border-left: 3px solid transparent;
   padding: 5px 0; gap: 0;
 }
 .ev.hidden { display: none; }
 .ev:hover { background: var(--bg-row); }
+
+/* per-type left stripe */
+.ev.ev-hook    { border-left-color: var(--hook); }
+.ev.ev-match   { border-left-color: var(--match); }
+.ev.ev-skip    { border-left-color: var(--dim); }
+.ev.ev-saved   { border-left-color: var(--saved); }
+.ev.ev-embok   { border-left-color: var(--embok); }
+.ev.ev-embfail { border-left-color: var(--embfail); }
+.ev.ev-ref     { border-left-color: var(--ref); }
 .ev-ts { font-size: 10px; color: var(--dim); padding: 0 10px; width: 72px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .ev-badge { font-family: var(--cond); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; width: 148px; flex-shrink: 0; padding-right: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ev-badge.hook    { color: var(--hook); }
@@ -459,7 +469,7 @@ function addRow(e, p) {
   const rawText = `${label} ${detail}`.replace(/<[^>]+>/g,' ');
 
   const row = document.createElement('div');
-  row.className = 'ev';
+  row.className = `ev ev-${cls}`;
   row.dataset.type = typeKey;
   row.dataset.ts = tsMs;
   row.dataset.raw = rawText.toLowerCase();
