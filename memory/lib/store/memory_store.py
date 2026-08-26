@@ -614,14 +614,22 @@ class MemoryStore:
                     return ep
         return None
 
-    def _parse_file(self, filepath: Path) -> Optional[MemoryEpisode]:
-        """Parse MD file with YAML frontmatter."""
+    def _parse_file(self, filepath: Path, include_embedding: bool = False) -> Optional[MemoryEpisode]:
+        """Parse MD file with YAML frontmatter.
+
+        include_embedding=False (default) strips the embedding list before
+        YAML parsing — 1024-float vectors are catastrophically slow in PyYAML
+        (~80ms each). Embeddings are stored in the vec sidecar SQLite DB and
+        never need to be loaded from disk for metadata queries.
+        """
         content = filepath.read_text()
-        # Extract frontmatter
         match = re.match(r"^---\n(.*?)\n---\n\n?(.*)$", content, re.DOTALL)
         if not match:
             return None
         fm_str, body = match.groups()
+        if not include_embedding:
+            # Strip the embedding block: key + all following "- float" list lines
+            fm_str = re.sub(r"\nembedding:(?:\n- [^\n]+)+", "", fm_str)
         episode = MemoryEpisode.from_frontmatter(fm_str, body.strip())
         return episode
 

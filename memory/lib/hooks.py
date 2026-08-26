@@ -48,6 +48,7 @@ class MemoryHookHandler:
         self._watcher_registry = None  # lazy: built on first PostToolUse
         self._project_root = ""  # set on first resolved event, used by _save()
         self._post_tool_count = 0   # incremented each PostToolUse; triggers periodic conv save
+        self._ep_cache: list | None = None  # populated once per process on first pre-tool call
 
     def _save(self, episode: MemoryEpisode) -> bool:
         """Embed then save — single call site so embed is never forgotten."""
@@ -164,7 +165,9 @@ class MemoryHookHandler:
 
         # ── 1. Instincts relevant to this tool call ────────────────────────
         try:
-            all_eps = self.store.list_episodes()
+            if self._ep_cache is None:
+                self._ep_cache = self.store.list_episodes()
+            all_eps = self._ep_cache
             tool_instincts = [
                 ep for ep in all_eps
                 if ep.layer == 2
@@ -368,6 +371,9 @@ class MemoryHookHandler:
 
         log = _log_bind(session_id=session_id, project=str(project_root), name="hooks")
         log.info("SessionStart project=%s", project_root)
+
+        # Warm episode cache now (session-start has budget; pre-tool calls must be fast)
+        self._ep_cache = self.store.list_episodes()
 
         from lib.indexers import IndexerRegistry
         registry = IndexerRegistry()
