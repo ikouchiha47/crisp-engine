@@ -143,14 +143,23 @@ html, body { height: 100%; background: var(--bg); color: var(--ink); font-family
 
 /* ── Sidebar ── */
 .sidebar { border-right: 1px solid var(--ink); background: var(--bg-panel); display: flex; flex-direction: column; overflow: hidden; }
-.sb-head { padding: 10px 12px 6px; font-family: var(--cond); font-size: 9px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--rule); }
-.sess-row { display: flex; align-items: center; padding: 7px 12px; gap: 6px; border-left: 2px solid transparent; border-bottom: 1px solid var(--rule); cursor: pointer; }
+.sb-head { padding: 10px 12px 6px; font-family: var(--cond); font-size: 9px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--rule); flex-shrink: 0; }
+.sb-list { overflow-y: auto; flex: 1; }
+.sb-list::-webkit-scrollbar { width: 3px; }
+.sb-list::-webkit-scrollbar-thumb { background: var(--dim); }
+
+/* project group header */
+.proj-row { display: flex; align-items: center; padding: 6px 12px 4px; gap: 5px; border-bottom: 1px solid var(--rule); background: var(--bg-row); position: sticky; top: 0; z-index: 1; }
+.proj-name { font-family: var(--cond); font-size: 11px; font-weight: 700; letter-spacing: .04em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj-n { font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* session row under a project */
+.sess-row { display: flex; align-items: center; padding: 5px 12px 5px 20px; gap: 5px; border-left: 2px solid transparent; border-bottom: 1px solid var(--rule); cursor: pointer; }
 .sess-row:hover { background: var(--bg-row); }
-.sess-row.active { border-left-color: var(--hook); }
-.sess-row.active .sess-name { color: var(--hook); font-weight: 500; }
-.sess-name { font-size: 11px; }
-.sess-n { margin-left: auto; font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.sess-row.idle .sess-name { color: var(--muted); }
+.sess-row.active { border-left-color: var(--hook); background: #f0f4ff; }
+.sess-row.active .sess-id { color: var(--hook); font-weight: 500; }
+.sess-id { font-size: 10px; font-variant-numeric: tabular-nums; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-n { font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; flex-shrink: 0; }
 
 /* ── Feed ── */
 .feed-col { display: flex; flex-direction: column; overflow: hidden; }
@@ -313,8 +322,8 @@ mark { background: #ffe066; color: var(--ink); border-radius: 1px; padding: 0 1p
 
     <!-- Sidebar -->
     <div class="sidebar">
-      <div class="sb-head">Sessions</div>
-      <div id="session-list"></div>
+      <div class="sb-head">Projects</div>
+      <div class="sb-list" id="session-list"></div>
     </div>
 
     <!-- Feed -->
@@ -422,22 +431,71 @@ function wBashActive() {
   document.getElementById('wl-bash').classList.remove('off');
 }
 
-const sessions = {};
+// projects[dirName] = { fullPath, count, sessions: { sid: {count, el} }, el (proj row) }
+const projects = {};
+let activeSid = null;
+
+function dirName(path) {
+  if (!path || path === '-') return null;
+  return path.split('/').filter(Boolean).pop();
+}
+
 function updateSessionList(sid, project) {
   if (!sid) return;
-  const key = sid;
-  if (!sessions[key]) {
-    // resolve a display name: ignore "-" placeholder, take last real path segment
-    const proj = (project && project !== '-') ? project.split('/').filter(Boolean).pop() : sid.slice(0, 7);
-    sessions[key] = { project: proj, count: 0, el: null };
-    const el = document.createElement('div');
-    el.className = 'sess-row' + (Object.keys(sessions).length === 1 ? ' active' : '');
-    sessions[key].el = el;
-    document.getElementById('session-list').appendChild(el);
+  const dir = dirName(project) || sid.slice(0, 7);
+  const fullPath = (project && project !== '-') ? project : null;
+
+  // ensure project group exists
+  if (!projects[dir]) {
+    projects[dir] = { fullPath, count: 0, sessions: {}, el: null, sessContainer: null };
+    const pEl = document.createElement('div');
+    pEl.className = 'proj-row';
+    pEl.title = fullPath || dir;
+    const sContainer = document.createElement('div');
+    projects[dir].el = pEl;
+    projects[dir].sessContainer = sContainer;
+    const list = document.getElementById('session-list');
+    list.appendChild(pEl);
+    list.appendChild(sContainer);
   }
-  sessions[key].count++;
-  const s = sessions[key];
-  s.el.innerHTML = `<span class="sess-name">${esc(s.project)}</span><span class="sess-n">${s.count}</span>`;
+
+  const proj = projects[dir];
+  proj.count++;
+
+  // ensure session row exists under project
+  if (!proj.sessions[sid]) {
+    const sEl = document.createElement('div');
+    sEl.className = 'sess-row' + (!activeSid ? ' active' : '');
+    if (!activeSid) activeSid = sid;
+    sEl.dataset.sid = sid;
+    sEl.addEventListener('click', () => filterBySid(sid, sEl));
+    proj.sessions[sid] = { count: 0, el: sEl };
+    proj.sessContainer.appendChild(sEl);
+  }
+
+  proj.sessions[sid].count++;
+
+  // update project header
+  const totalSessions = Object.keys(proj.sessions).length;
+  proj.el.innerHTML = `<span class="proj-name">${esc(dir)}</span><span class="proj-n">${totalSessions} sess</span>`;
+
+  // update session row
+  const s = proj.sessions[sid];
+  s.el.innerHTML = `<span class="sess-id">${esc(sid.slice(0, 8))}</span><span class="sess-n">${s.count}</span>`;
+}
+
+function filterBySid(sid, clickedEl) {
+  activeSid = sid;
+  document.querySelectorAll('.sess-row').forEach(r => r.classList.toggle('active', r.dataset.sid === sid));
+  // filter feed rows by session — stored in dataset.session set during addRow
+  document.querySelectorAll('#feed .ev').forEach(row => {
+    if (row.dataset.session && row.dataset.session !== sid) {
+      row.classList.add('hidden');
+    } else {
+      applyFilter(row);
+    }
+  });
+  updateFilterCount();
 }
 
 // ── Badge class from event name ────────────────────────────────────────────
@@ -516,6 +574,7 @@ function addRow(e, p) {
   row.dataset.type = typeKey;
   row.dataset.ts = tsMs;
   row.dataset.raw = rawText.toLowerCase();
+  row.dataset.session = e.session || p.session_id || '';
   row.innerHTML = `<span class="ev-ts">${fmtTs(e.ts)}</span><span class="ev-badge ${cls}">${label}</span><span class="ev-detail">${detail}</span>`;
 
   document.getElementById('feed').insertBefore(row, document.getElementById('no-results'));
