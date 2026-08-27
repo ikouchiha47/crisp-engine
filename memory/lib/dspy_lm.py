@@ -75,6 +75,13 @@ _DEFAULT_MM_CONFIG = {
     "api_base": "http://localhost:11434",
     "timeout": 30,
     "num_retries": 0,
+    # Keeps the model resident in VRAM for 30min after each call instead
+    # of Ollama's own 5min default eviction — verified live this session
+    # (litellm forwards this straight through to Ollama's /api/chat body;
+    # confirmed via a real ollama ps expires_at check). Avoids a real cold
+    # -start tax (measured earlier: ~37s cold vs ~1.7s warm) on every
+    # narrate_l1/l2/l3/distill call across separate consolidate() runs.
+    "keep_alive": "30m",
 }
 
 

@@ -415,17 +415,25 @@ class MemoryReflector:
                         self.store._write_raw(ep)
                     result["l1_created"] += 1
 
-        l2l3_auto = str(_cfg.load().get("consolidation_l2l3_auto", "")).lower() in ("1", "true", "yes")
-        if l2l3_auto or force_l2l3:
+        # `consolidation_l2l3_auto` alone was a dead gate in real production
+        # — confirmed this session: nothing in the real hook flow ever sets
+        # it or passes force_l2l3=True, so L2/L3 never fired at all, not
+        # even once real volume existed. Real fix: derive the gate from
+        # actual unclustered volume (the 10/3 thresholds below were already
+        # real secondary checks, just unreachable). The config flag/
+        # force_l2l3 still work as an explicit override for a manual run.
+        config_l2l3_auto = str(_cfg.load().get("consolidation_l2l3_auto", "")).lower() in ("1", "true", "yes")
+        unclustered_l1 = [
+            ep for ep in self.store.list_episodes(layer=1, include_embedding=True)
+            if not ep.parent_id
+        ]
+        l2_auto = config_l2l3_auto or force_l2l3 or len(unclustered_l1) >= 10
+        if l2_auto:
             # L1 → L2 clustering, embedding-similarity based (see
             # _cluster_l1_by_embedding). Only L1s not already folded into an
             # L2 are eligible (parent_id unset) — the old version had no
             # idempotency marker and would keep re-clustering the same
             # ids[:10] slice forever.
-            unclustered_l1 = [
-                ep for ep in self.store.list_episodes(layer=1, include_embedding=True)
-                if not ep.parent_id
-            ]
             if len(unclustered_l1) >= 10:
                 for group in self._cluster_l1_by_embedding(unclustered_l1, min_size=10):
                     l2 = self.generate_l2_cluster([ep.id for ep in group])
@@ -436,10 +444,14 @@ class MemoryReflector:
                             self.store._write_raw(ep)
                         result["l2_created"] += 1
 
-            # L2 → L3: same idempotency fix — only L2s not already folded
-            # into an L3 (parent_id unset), oldest first (arcs accumulate
-            # chronologically, not by topic-similarity).
-            unclustered_l2 = [ep for ep in self.store.list_episodes(layer=2) if not ep.parent_id]
+        # L2 → L3: independent gate from L2's above (L1 volume dropping
+        # back under 10 after a clustering run must not block L3 from
+        # firing on leftover L2s) — same idempotency fix, only L2s not
+        # already folded into an L3 (parent_id unset), oldest first (arcs
+        # accumulate chronologically, not by topic-similarity).
+        unclustered_l2 = [ep for ep in self.store.list_episodes(layer=2) if not ep.parent_id]
+        l3_auto = config_l2l3_auto or force_l2l3 or len(unclustered_l2) >= 3
+        if l3_auto:
             unclustered_l2.sort(key=lambda e: parse_ts(e.timestamp))
             for i in range(0, len(unclustered_l2) - len(unclustered_l2) % 3, 3):
                 batch = unclustered_l2[i:i + 3]
