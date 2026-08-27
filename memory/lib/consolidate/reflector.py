@@ -1,45 +1,53 @@
 """Memory reflection and consolidation (L0 → L1 → L2 → L3)."""
 
-import re
+import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import dspy
+
 from .. import config as _cfg
-from ..bus import emit as _bus_emit, ReflectRan
+from ..bus import (
+    emit as _bus_emit,
+    frustration_signals_for_session as _frustration_signals_for_session,
+    NarrateResult,
+    ReflectRan,
+)
 from ..code_index import CodeAnalyzer
+from ..dspy_lm import get_dspy_lm
+from ..episode_writer import EpisodeWriter
+from ..hot_memory import HotMemoryStore
 from ..memory_policy import is_episodic
+from ..narrate import narrate_l1, narrate_l2, narrate_l3
+from ..promote import promote_recurring_patterns
 from ..store import MemoryEpisode, MemoryStore
 from ..time_utils import now_iso, parse_ts
-
-
-def _dedup(items: list) -> list:
-    """Return items with duplicates removed, preserving order."""
-    seen: set = set()
-    out = []
-    for item in items:
-        key = item.strip().lower()[:80]
-        if key not in seen:
-            seen.add(key)
-            out.append(item)
-    return out
 
 
 class MemoryReflector:
     """Generates higher-level summaries from raw memory episodes."""
 
-    def __init__(self, store: MemoryStore):
+    def __init__(self, store: MemoryStore, lm: Optional[dspy.LM] = None):
         self.store = store
         self.analyzer = CodeAnalyzer()
+        self.lm = lm  # built once per consolidate() call, not per method
+        # L1s need real embeddings for _cluster_l1_by_embedding — reuse the
+        # same embed-then-save path every other hook collaborator uses,
+        # rather than a second embedding call site.
+        self._writer = EpisodeWriter(store)
+        self._hot = HotMemoryStore(store)
 
     def generate_l1_summary(self, episode_ids: List[str]) -> Optional[MemoryEpisode]:
         """Generate L1 summary from a group of L0 episodes.
 
-        Content priority for lessons (highest → lowest):
-          1. git_commit episodes  — subject line is a human-written lesson
-          2. ep.lesson field      — set by hooks on correction/frustration detection
-          3. ep.correction_delta  — what specifically changed
-          4. first sentence of ep.content — better than nothing
+        The narrative ("Lessons / observations") is real LLM output
+        (lib/narrate.py) — no template fallback. If no provider is
+        configured/reachable, this returns None rather than writing a
+        signature-dump or first-sentence-scrape "summary": quiet beats
+        actively wrong (same rule build_context_block follows).
+        Commits/corrections/friction-points sections stay — those are real
+        derived data, not narrative, nothing templated about them.
         """
         episodes = []
         for eid in episode_ids:
@@ -96,24 +104,22 @@ class MemoryReflector:
                 lines.append(f"- [{ep.frustration_score:.1f}] {ep.title}")
             lines.append("")
 
-        # ── Lessons from all non-commit episodes ───────────────────────────
-        lessons = []
-        for ep in episodes:
-            if ep.category == "git_commit":
-                continue
-            lesson = (
-                ep.lesson
-                or ep.correction_delta
-                or self._first_sentence(ep.content)
-            )
-            if lesson:
-                lessons.append(lesson)
+        # ── Lessons: real LLM narrative only, no template fallback ─────────
+        narrative_input = [ep.content for ep in episodes if ep.category != "git_commit" and ep.content]
+        narrative = narrate_l1(self.lm, narrative_input)
+        used_llm = narrative is not None
+        try:
+            _bus_emit(NarrateResult(
+                session_id=episodes[0].session_id, project="-", layer=1, used_llm=used_llm,
+            ))
+        except Exception:
+            pass
+        if not narrative:
+            return None  # quiet beats actively wrong — no L1 this round
 
-        if lessons:
-            lines.append("## Lessons / observations")
-            for l in _dedup(lessons)[:10]:
-                lines.append(f"- {l}")
-            lines.append("")
+        lines.append("## Lessons / observations")
+        lines.append(narrative)
+        lines.append("")
 
         # ── Code elements touched ──────────────────────────────────────────
         seen_files: set = set()
@@ -170,17 +176,6 @@ class MemoryReflector:
         )
         return l1
 
-    @staticmethod
-    def _first_sentence(text: str) -> str:
-        """Extract first meaningful sentence from content, skip markdown headers."""
-        for line in text.splitlines():
-            line = line.strip().lstrip("#").strip()
-            if len(line) > 20 and not line.startswith("```"):
-                # Truncate at first sentence boundary
-                m = re.search(r"[.!?]", line)
-                return line[: m.end()].strip() if m else line[:120]
-        return ""
-
     def _common_tags(self, episodes: List[MemoryEpisode]) -> List[str]:
         """Find common tags across episodes."""
         if not episodes:
@@ -193,8 +188,31 @@ class MemoryReflector:
         threshold = len(episodes) / 2
         return [tag for tag, count in tag_counts.items() if count >= threshold]
 
+    def _l1_text_with_frustration(self, l1: MemoryEpisode) -> str:
+        """L1 content plus a compact summary of that session's real
+        FrustrationSignal bus events (ADR-004 item 4: these were
+        persisted and never read back into anything — this is that read).
+        Appended as plain text so narrate_l2's existing "RECURRING AGENT
+        FAILURES"/process-rule categories can pick up on a pattern like
+        repeated high-intensity/compact_under_fire exits across sessions,
+        without a schema change to narrate_l2 itself."""
+        signals = _frustration_signals_for_session(l1.session_id)
+        if not signals:
+            return l1.content
+        high = sum(1 for s in signals if s.get("intensity") in ("high", "extreme"))
+        exits = [s.get("exit_type") for s in signals if s.get("exit_type") not in (None, "none")]
+        if not high and not exits:
+            return l1.content
+        note = f"[This session had {len(signals)} frustration signal(s)"
+        if high:
+            note += f", {high} high/extreme intensity"
+        if exits:
+            note += f", exit types: {', '.join(sorted(set(exits)))}"
+        note += "]"
+        return l1.content + "\n\n" + note
+
     def generate_l2_cluster(
-        self, l1_ids: List[str], topic: str
+        self, l1_ids: List[str]
     ) -> Optional[MemoryEpisode]:
         """Generate L2 topic cluster from L1 summaries."""
         l1_summaries = []
@@ -206,39 +224,28 @@ class MemoryReflector:
         if not l1_summaries:
             return None
 
-        lines = [f"# Topic Cluster: {topic}", ""]
+        # Sort chronologically — the source of the AUDIT.md-flagged reversed
+        # date-range bug was taking [0]/[-1] on an unsorted list.
+        l1_summaries.sort(key=lambda e: parse_ts(e.timestamp))
+
+        l2_input = [self._l1_text_with_frustration(l1) for l1 in l1_summaries]
+        narrated = narrate_l2(self.lm, l2_input)
+        used_llm = narrated is not None
+        try:
+            _bus_emit(NarrateResult(session_id="cluster", project="-", layer=2, used_llm=used_llm))
+        except Exception:
+            pass
+        if not narrated:
+            return None  # quiet beats actively wrong — no L2 this round
+        real_topic, synthesis = narrated
+
+        lines = [f"# Topic Cluster: {real_topic}", ""]
         lines.append(f"**{len(l1_summaries)} session summaries**")
         lines.append(f"**First session:** {l1_summaries[0].timestamp[:10]}")
         lines.append(f"**Last session:** {l1_summaries[-1].timestamp[:10]}")
         lines.append("")
-
-        # Extract evolution
-        lines.append("## Evolution")
-        for l1 in l1_summaries:
-            date = l1.timestamp[:10]
-            # Extract first paragraph
-            first_para = (
-                l1.content.split("\n\n")[0]
-                if "\n\n" in l1.content
-                else l1.content[:200]
-            )
-            lines.append(f"- **{date}**: {first_para[:150]}...")
-        lines.append("")
-
-        # Common patterns
-        all_lessons = []
-        for l1 in l1_summaries:
-            # Extract lessons from content
-            lessons = re.findall(
-                r"- (?:Key lessons?:|Lesson:|Learned:)\s*(.+)", l1.content
-            )
-            all_lessons.extend(lessons)
-
-        if all_lessons:
-            lines.append("## Recurring Patterns")
-            for lesson in all_lessons[:10]:
-                lines.append(f"- {lesson}")
-            lines.append("")
+        lines.append("## Synthesis")
+        lines.append(synthesis)
 
         content = "\n".join(lines)
 
@@ -247,23 +254,23 @@ class MemoryReflector:
             session_id="cluster",
             timestamp=now_iso(),
             layer=2,
-            title=f"Cluster: {topic}",
+            title=f"Cluster: {real_topic}",
             content=content,
-            tags=[topic, "cluster"],
+            tags=[real_topic, "cluster"],
             category="cluster",
             importance=0.8,
             parent_id="",
             linked_ids=l1_ids,
-            context_snapshot={"source_summaries": l1_ids, "topic": topic},
+            context_snapshot={"source_summaries": l1_ids, "topic": real_topic},
             is_permanent=True,
         )
 
         return l2
 
-    def generate_l3_arc(
-        self, l2_ids: List[str], arc_name: str
-    ) -> Optional[MemoryEpisode]:
-        """Generate L3 life-arc from L2 clusters."""
+    def generate_l3_arc(self, l2_ids: List[str]) -> Optional[MemoryEpisode]:
+        """Generate L3 life-arc from L2 clusters. Arc name is derived by the
+        LLM from actual cluster content — no caller-supplied name anymore
+        (was always "Personal Development" in practice, ignoring content)."""
         l2_clusters = []
         for cid in l2_ids:
             ep = self.store.get_episode(cid)
@@ -273,32 +280,37 @@ class MemoryReflector:
         if not l2_clusters:
             return None
 
-        lines = [f"# Life Arc: {arc_name}", ""]
+        l2_clusters.sort(key=lambda e: parse_ts(e.timestamp))
+
+        narrated = narrate_l3(self.lm, [l2.content for l2 in l2_clusters])
+        used_llm = narrated is not None
+        try:
+            _bus_emit(NarrateResult(session_id="arc", project="-", layer=3, used_llm=used_llm))
+        except Exception:
+            pass
+        if not narrated:
+            return None  # quiet beats actively wrong — no L3 this round
+        real_arc_name, meta_lessons = narrated
+
+        # ADR-004 Track A: full-replace hot/identity.md with the latest L3
+        # arc's standing laws — this is the fix for L3 being write-only
+        # (confirmed this session: nothing previously read L3 back into
+        # anything). Read at SessionStart, not per-tool-call — see
+        # lib/hooks/injection.py and lib/hooks/__init__.py.
+        try:
+            self._hot.write_identity(meta_lessons)
+        except Exception:
+            pass
+
+        lines = [f"# Life Arc: {real_arc_name}", ""]
         lines.append(f"**{len(l2_clusters)} topic clusters**")
         lines.append(
             f"**Time span:** {l2_clusters[0].timestamp[:10]} to {l2_clusters[-1].timestamp[:10]}"
         )
         lines.append("")
-
-        lines.append("## Arc Overview")
-        for l2 in l2_clusters:
-            lines.append(f"### {l2.title}")
-            # First meaningful paragraph
-            paras = [
-                p
-                for p in l2.content.split("\n\n")
-                if p.strip() and not p.startswith("#")
-            ]
-            if paras:
-                lines.append(paras[0][:300] + "...")
-            lines.append("")
-
         lines.append("## Meta-Lessons")
-        lines.append("Patterns that span across all clusters:")
-        lines.append("- User preferences and working style evolution")
-        lines.append("- Recurring challenges and solutions")
-        lines.append("- Skill development trajectory")
-        lines.append("- Decision-making patterns")
+        for lesson in meta_lessons:
+            lines.append(f"- {lesson}")
 
         content = "\n".join(lines)
 
@@ -307,18 +319,56 @@ class MemoryReflector:
             session_id="arc",
             timestamp=now_iso(),
             layer=3,
-            title=f"Arc: {arc_name}",
+            title=f"Arc: {real_arc_name}",
             content=content,
-            tags=[arc_name, "arc", "meta"],
+            tags=[real_arc_name, "arc", "meta"],
             category="arc",
             importance=1.0,
             parent_id="",
             linked_ids=l2_ids,
-            context_snapshot={"source_clusters": l2_ids, "arc_name": arc_name},
+            context_snapshot={"source_clusters": l2_ids, "arc_name": real_arc_name},
             is_permanent=True,
         )
 
         return l3
+
+    def _cluster_l1_by_embedding(
+        self, l1_episodes: List[MemoryEpisode], min_size: int
+    ) -> List[List[MemoryEpisode]]:
+        """Group L1 summaries by real semantic similarity instead of the old
+        `context_snapshot["categories"][0]` string bucket — that bucket is
+        almost always "conversation" for every L1 (is_episodic() collapses
+        most real categories into it), so it produced one giant, arbitrarily
+        ordered pool rather than anything resembling a topic. This groups by
+        cosine similarity on the same embeddings every other episode already
+        gets (see EpisodeWriter.embed), greedily: pick an unclustered seed,
+        take its `min_size - 1` nearest unclustered neighbors, repeat.
+        Episodes with no embedding (embed provider unreachable) are dropped
+        from clustering entirely rather than grouped arbitrarily — quiet
+        beats actively wrong.
+        """
+        def cosine(a: List[float], b: List[float]) -> float:
+            if not a or not b or len(a) != len(b):
+                return -1.0
+            dot = sum(x * y for x, y in zip(a, b))
+            na = math.sqrt(sum(x * x for x in a))
+            nb = math.sqrt(sum(y * y for y in b))
+            if na == 0 or nb == 0:
+                return -1.0
+            return dot / (na * nb)
+
+        remaining = [ep for ep in l1_episodes if ep.embedding]
+        groups: List[List[MemoryEpisode]] = []
+        while len(remaining) >= min_size:
+            seed = remaining[0]
+            scored = sorted(
+                remaining[1:], key=lambda ep: cosine(seed.embedding, ep.embedding), reverse=True,
+            )
+            group = [seed] + scored[: min_size - 1]
+            group_ids = {ep.id for ep in group}
+            remaining = [ep for ep in remaining if ep.id not in group_ids]
+            groups.append(group)
+        return groups
 
     def consolidate(self, max_l0_per_batch: int = 20, force_l2l3: bool = False) -> Dict[str, Any]:
         """Run consolidation: L0 → L1 always; L1 → L2 → L3 only when
@@ -331,6 +381,11 @@ class MemoryReflector:
         distill) gives L1 real content worth clustering.
         """
         result = {"l1_created": 0, "l2_created": 0, "l3_created": 0}
+
+        if self.lm is None:
+            merged = _cfg.load()
+            merged.update(self.store.config)
+            self.lm = get_dspy_lm(merged)
 
         # Get all L0 episodes not yet summarized — episodic categories only.
         # code_element/code_index_dir are structural (see memory_policy.py),
@@ -351,7 +406,9 @@ class MemoryReflector:
                 batch = unsummarized[:max_l0_per_batch]
                 l1 = self.generate_l1_summary([ep.id for ep in batch])
                 if l1:
-                    self.store.save_episode(l1)
+                    # embed-then-save so _cluster_l1_by_embedding has a
+                    # real vector to work with once this L1 is eligible
+                    self._writer.save(l1)
                     # Update parent links
                     for ep in batch:
                         ep.parent_id = l1.id
@@ -360,35 +417,48 @@ class MemoryReflector:
 
         l2l3_auto = str(_cfg.load().get("consolidation_l2l3_auto", "")).lower() in ("1", "true", "yes")
         if l2l3_auto or force_l2l3:
-            # L1 → L2 clustering (simplified: group by common tags)
-            l1_episodes = self.store.list_episodes(layer=1)
-            if len(l1_episodes) >= 10:
-                # Group by common categories
-                categories = defaultdict(list)
-                for ep in l1_episodes:
-                    cat = (
-                        ep.context_snapshot.get("categories", ["general"])[0]
-                        if ep.context_snapshot
-                        else "general"
-                    )
-                    categories[cat].append(ep.id)
+            # L1 → L2 clustering, embedding-similarity based (see
+            # _cluster_l1_by_embedding). Only L1s not already folded into an
+            # L2 are eligible (parent_id unset) — the old version had no
+            # idempotency marker and would keep re-clustering the same
+            # ids[:10] slice forever.
+            unclustered_l1 = [
+                ep for ep in self.store.list_episodes(layer=1, include_embedding=True)
+                if not ep.parent_id
+            ]
+            if len(unclustered_l1) >= 10:
+                for group in self._cluster_l1_by_embedding(unclustered_l1, min_size=10):
+                    l2 = self.generate_l2_cluster([ep.id for ep in group])
+                    if l2:
+                        self.store.save_episode(l2)
+                        for ep in group:
+                            ep.parent_id = l2.id
+                            self.store._write_raw(ep)
+                        result["l2_created"] += 1
 
-                for topic, ids in categories.items():
-                    if len(ids) >= 10:
-                        l2 = self.generate_l2_cluster(ids[:10], topic)
-                        if l2:
-                            self.store.save_episode(l2)
-                            result["l2_created"] += 1
-
-            # L2 → L3 (if we have multiple clusters)
-            l2_episodes = self.store.list_episodes(layer=2)
-            if len(l2_episodes) >= 3:
-                l3 = self.generate_l3_arc(
-                    [ep.id for ep in l2_episodes[:3]], "Personal Development"
-                )
+            # L2 → L3: same idempotency fix — only L2s not already folded
+            # into an L3 (parent_id unset), oldest first (arcs accumulate
+            # chronologically, not by topic-similarity).
+            unclustered_l2 = [ep for ep in self.store.list_episodes(layer=2) if not ep.parent_id]
+            unclustered_l2.sort(key=lambda e: parse_ts(e.timestamp))
+            for i in range(0, len(unclustered_l2) - len(unclustered_l2) % 3, 3):
+                batch = unclustered_l2[i:i + 3]
+                l3 = self.generate_l3_arc([ep.id for ep in batch])
                 if l3:
                     self.store.save_episode(l3)
+                    for ep in batch:
+                        ep.parent_id = l3.id
+                        self.store._write_raw(ep)
                     result["l3_created"] += 1
+
+        # Fast lane, independent of the L1->L2->L3 cascade above (see
+        # lib/promote.py, plans/ADR-004-hot-path-and-feedback-loops.md):
+        # a handful of recurring `undelivered` episodes writes straight
+        # into the hot path, without waiting for full cascade volume.
+        try:
+            result["promoted"] = promote_recurring_patterns(self.store, self.lm)
+        except Exception:
+            result["promoted"] = 0
 
         try:
             _bus_emit(ReflectRan(

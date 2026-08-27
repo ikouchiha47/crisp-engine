@@ -174,3 +174,13 @@ capture → local distill (Qwen) → store/hot → inject into host → user cor
 | Meaning (distill) | Missing | Phase 3 |
 | Out (efferent inject) | Weak/noisy | Phases 1–2 |
 | Feedback | CLI only | Phase 5 |
+
+---
+
+## Parked: migrate lib/generate.py to DSPy
+
+Current `lib/generate.py` is a hand-rolled provider chain (`OllamaChatProvider`/`HFChatProvider`, manual JSON parsing via `json.loads()`+`.get()`+`isinstance` checks in `lib/narrate.py`) that copied `embeddings.py`'s existing hand-rolled-chain shape without questioning whether that shape was right for chat/generation. It works (verified live: clean JSON parse, correct field names, no text-stripping needed) but has no real output validation — a malformed field (e.g. `meta_lessons` returned as a string instead of a list) silently degrades to an empty result instead of surfacing as an error.
+
+`dspy.Signature` with Pydantic-typed output fields would: give real validation instead of silent degradation, collapse the whole provider-chain (Ollama/HF/OpenAI/Anthropic/Gemini) into one `dspy.LM(...)` config string via LiteLLM, and support `Predict`/`ChainOfThought`/`ReAct` module upgrades later without touching call sites. `embeddings.py` already has `DSPyEmbeddingProvider` as one of its fallback options, so this isn't a new dependency, just extending an already-accepted one to be the primary path for generation too.
+
+Not blocking anything currently built on `lib/generate.py`/`lib/narrate.py` — parked until the L0-L3 + hot-memory + instinct-auto-trigger arc is proven working end-to-end.

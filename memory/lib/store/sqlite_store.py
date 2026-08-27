@@ -260,7 +260,13 @@ class SQLiteVecStore:
         layer: Optional[int] = None,
         category: Optional[str] = None,
         tag: Optional[str] = None,
+        include_embedding: bool = False,
     ) -> List[MemoryEpisode]:
+        # include_embedding is a no-op here: this backend never carries the
+        # vector in the episodes row at all (it lives in the separate
+        # ep_vecs sidecar table, queried via search_by_embedding) — accepted
+        # only so callers written against the MemoryStore signature (e.g.
+        # MemoryReflector._cluster_l1_by_embedding) don't hit a TypeError.
         clauses: List[str] = []
         params: List[Any] = []
 

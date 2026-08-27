@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from lib.store import MemoryStore
 
-from .episode_writer import EpisodeWriter
+from ..episode_writer import EpisodeWriter
 
 
 class WatcherDispatch:

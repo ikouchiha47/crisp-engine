@@ -14,9 +14,13 @@ from lib.store.memory_store import is_code_index_category
 
 EPISODIC_CATEGORIES = frozenset({
     "conversation", "correction", "frustration", "preference", "git_commit",
+    "reversal", "undelivered",
 })
 
-INJECTABLE_CATEGORIES = frozenset({"preference", "correction"})
+INJECTABLE_CATEGORIES = frozenset({"preference", "correction", "reversal"})
+# "undelivered" is deliberately excluded — it's an open item that may get
+# resolved, not yet a settled standing fact like a preference/correction/
+# reversal (see docs/prompt-critique-brief.md ownership table).
 
 INSTINCT_CONFIDENCE_THRESHOLD = 0.5
 

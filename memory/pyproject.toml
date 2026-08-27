@@ -30,6 +30,7 @@ dependencies = [
     "fastapi>=0.128.8",
     "uvicorn>=0.39.0",
     "networkx>=3.0",
+    "dspy>=2.6.27",
 ]
 
 [project.optional-dependencies]
@@ -45,7 +46,6 @@ full = [
 semantic = [
     "sentence-transformers>=3.0",   # HuggingFace local embeddings (BAAI/bge-small-en-v1.5)
     "sqlite-vec>=0.1.6",            # ANN vector search via SQLite extension
-    "dspy>=2.5",                    # configurable LM/embedding backend
     "gensim>=4.3",                  # word2vec averaged-vector fallback (glove-wiki-gigaword-50)
 ]
 # Optional: tree-sitter for enhanced code analysis (install manually if needed)

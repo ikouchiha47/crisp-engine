@@ -10,7 +10,7 @@ from lib.lang_detect import is_source_extension
 from lib.log import get_logger as _get_logger
 from lib.store import MemoryEpisode, MemoryStore, is_code_index_category
 
-from .episode_writer import EpisodeWriter
+from ..episode_writer import EpisodeWriter
 
 _log = _get_logger("hooks")
 

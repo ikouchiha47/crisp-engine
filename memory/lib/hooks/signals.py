@@ -16,7 +16,7 @@ from lib.lang_detect import is_source_extension
 from lib.log import bind as _log_bind
 from lib.store import MemoryEpisode, MemoryStore
 
-from .episode_writer import EpisodeWriter
+from ..episode_writer import EpisodeWriter
 
 
 class SignalDetector:

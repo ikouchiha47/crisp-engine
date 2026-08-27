@@ -8,6 +8,8 @@ from pathlib import Path
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+import dspy
+
 from lib.store import MemoryEpisode, MemoryStore
 from lib.code_index import CodeAnalyzer
 from lib.consolidate import MemoryReflector
@@ -227,8 +229,17 @@ def test_reflection():
             )
             store.save_episode(episode)
 
-        # Run consolidation
-        reflector = MemoryReflector(store)
+        # Run consolidation — DummyLM, no real network call (narrate_l1 is
+        # LLM-backed now via lib/narrate.py, this is a unit test not an
+        # e2e one; see test_e2e_real_pipeline.py for the real-LM version).
+        # Answers are consumed in call order: NarrateL1 first, then
+        # JudgeL1Completeness (dspy.Refine's reward fn) — a perfect score
+        # on the first pass means Refine stops without a 2nd/3rd attempt.
+        lm = dspy.utils.DummyLM([
+            {"narrative": "Twenty conversation episodes were recorded for this session."},
+            {"score": 1.0},
+        ])
+        reflector = MemoryReflector(store, lm=lm)
         result = reflector.consolidate(max_l0_per_batch=20)
         
         assert result["l1_created"] > 0

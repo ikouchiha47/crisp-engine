@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.hooks.episode_writer import EpisodeWriter
+from lib.episode_writer import EpisodeWriter
 from lib.hooks.signals import SignalDetector
 
 

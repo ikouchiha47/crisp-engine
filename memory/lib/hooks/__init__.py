@@ -35,7 +35,7 @@ from lib.log import bind as _log_bind, get_logger as _get_logger
 from lib.session import upsert as _session_upsert
 from lib.store import MemoryStore
 
-from .episode_writer import EpisodeWriter
+from ..episode_writer import EpisodeWriter
 from .injection import ContextInjector
 from .signals import SignalDetector
 from .structural_index import StructuralIndexer

@@ -11,11 +11,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+from lib import config as _cfg
 from lib.affect import distill_to_episodes
+from lib.bus import emit as _bus_emit, FrustrationSignal, InstinctAutoTrigger
+from lib.consolidate import MemoryReflector
+from lib.dspy_lm import get_dspy_lm
+from lib.instincts import InstinctEngine
 from lib.log import bind as _log_bind, get_logger as _get_logger
+from lib.narrate import narrate_title
 from lib.store import MemoryEpisode, MemoryStore
 
-from .episode_writer import EpisodeWriter
+from ..episode_writer import EpisodeWriter
+from ..hot_memory import HotMemoryStore
 
 _log = _get_logger("hooks")
 
@@ -27,9 +34,18 @@ class TranscriptService:
     def __init__(self, store: MemoryStore, writer: EpisodeWriter):
         self.store = store
         self.writer = writer
+        self._lm = None  # lazy: built once, reused by title + distill calls
 
-    def read_transcript(self, path: Path, max_turns: int = 30) -> tuple:
-        """Read JSONL transcript, return (markdown_text, turn_count)."""
+    def _get_lm(self):
+        if self._lm is None:
+            merged = _cfg.load()
+            merged.update(self.store.config)
+            self._lm = get_dspy_lm(merged)
+        return self._lm
+
+    def _parse_all_turns(self, path: Path) -> List[str]:
+        """Parse every user/assistant turn in a JSONL transcript, in order.
+        No truncation, no windowing — that happens in read_new_turns."""
         turns: List[str] = []
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
@@ -59,23 +75,74 @@ class TranscriptService:
                         label = "User" if role == "user" else "Assistant"
                         turns.append(f"**{label}:** {content.strip()}")
         except Exception:
-            return "", 0
+            return []
+        return turns
 
-        recent = turns[-max_turns:]
-        text = "\n\n".join(recent)
-        if len(text) > 15000:
-            text = text[-15000:]
-        return text, len(recent)
+    def _cursor_key(self, session_id: str) -> str:
+        return f"transcript:cursor:{session_id}"
+
+    def read_new_turns(self, path: Path, session_id: str, max_turns: int = 30) -> List[tuple]:
+        """Read every turn NEW since this session's last capture, paginated
+        into chunks of up to max_turns each. Returns a list of
+        (markdown_text, turn_count) — one entry per chunk, covering the
+        FULL delta, not just a trailing window.
+
+        Previously this method (read_transcript) re-read the whole file
+        every call and kept only the last 30 turns, silently discarding
+        everything before that — verified this session: a 1191-turn real
+        session produced only 6 captured episodes across 2 weeks because
+        of this. A turn-index cursor persisted via store.get_file_state
+        (same delta-tracking pattern already used for git log ingestion's
+        last_sha) fixes it: nothing captured once is ever re-read, and
+        nothing new is ever silently dropped.
+        """
+        turns = self._parse_all_turns(path)
+        if not turns:
+            return []
+
+        cursor_key = self._cursor_key(session_id)
+        try:
+            cursor = int(self.store.get_file_state(cursor_key) or "0")
+        except (ValueError, TypeError):
+            cursor = 0
+        cursor = max(0, min(cursor, len(turns)))  # transcript could have been reset/rotated
+
+        new_turns = turns[cursor:]
+        if not new_turns:
+            return []
+
+        chunks: List[tuple] = []
+        for i in range(0, len(new_turns), max_turns):
+            page = new_turns[i:i + max_turns]
+            text = "\n\n".join(page)
+            if len(text) > 15000:
+                # A single page is still bounded for an LLM call — but this
+                # is a per-page cap on one already-small unit, not a
+                # silent-drop of the rest of the session like before.
+                text = text[:15000] + "\n\n_(truncated: this page alone exceeded 15000 chars)_"
+            chunks.append((text, len(page)))
+
+        self.store.set_file_state(cursor_key, str(len(turns)))
+        return chunks
 
     def conversation_episode(self, session_id: str, context: str, turn_count: int) -> MemoryEpisode:
-        """Create an L0 episode from a conversation transcript."""
-        episode_id = f"conv_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        """Create an L0 episode from a conversation transcript chunk.
+
+        Title is a real LLM call (lib/narrate.py::narrate_title) — a
+        heuristic "first meaningful line" version was tried and rejected:
+        it just truncates real content into a fake-looking label instead of
+        describing what the chunk was actually about. Falls back to the
+        literal string "Conversation" (an honest null value, not a fake
+        summary) only when no provider is reachable at all.
+        """
+        title = narrate_title(self._get_lm(), context) or "Conversation"
+        episode_id = f"conv_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S%f')}"
         return MemoryEpisode(
             id=episode_id,
             session_id=session_id,
             timestamp=datetime.now(timezone.utc).isoformat(),
             layer=0,
-            title=f"Conversation: {session_id[:12]}",
+            title=title,
             content=f"# Conversation Transcript\n\n{context}",
             source_type="conversation",
             category="conversation",
@@ -85,7 +152,14 @@ class TranscriptService:
         )
 
     def async_conv_snapshot(self, session_id: str, transcript_path: str, project_root: str) -> None:
-        """Save a conversation episode in a background thread — never blocks the hook."""
+        """Save conversation episodes for every new chunk in a background
+        thread — never blocks the hook.
+
+        Same daemon-thread-dies-with-the-process caveat as before applies
+        here (PostToolUse is async by hook config, so the process may exit
+        before this finishes) — not fixed in this pass, only the capture
+        completeness (read_new_turns) was. Flagged, not silently ignored.
+        """
         import threading
 
         def _run():
@@ -93,18 +167,18 @@ class TranscriptService:
                 path = Path(transcript_path)
                 if not path.exists():
                     return
-                context, turn_count = self.read_transcript(path)
-                if context and turn_count >= 3:
-                    ep = self.conversation_episode(session_id, context, turn_count)
-                    self.writer.save(ep)
-                    _log.info("periodic conv snapshot saved: %s turns=%d", ep.id, turn_count,
-                              extra={"session_id": session_id, "project": project_root})
+                for context, turn_count in self.read_new_turns(path, session_id):
+                    if context and turn_count >= 3:
+                        ep = self.conversation_episode(session_id, context, turn_count)
+                        self.writer.save(ep)
+                        _log.info("periodic conv snapshot saved: %s turns=%d", ep.id, turn_count,
+                                  extra={"session_id": session_id, "project": project_root})
             except Exception as exc:
                 _log.debug("periodic conv snapshot failed: %s", exc)
         threading.Thread(target=_run, daemon=True, name="crisp-conv-snapshot").start()
 
-    def run_distill(self, session_id: str, context: str, project_root: str) -> None:
-        """Extract preferences/corrections from a transcript.
+    def run_distill(self, session_id: str, context: str, project_root: str, prior_summary: str = "") -> str:
+        """Extract preferences/corrections from a transcript chunk.
 
         Called inline, not backgrounded: crisp-hook is a short-lived CLI
         process, and a daemon thread started here gets killed the instant
@@ -115,28 +189,67 @@ class TranscriptService:
         SessionEnd/PreCompact already run synchronously by hook-config
         design (see HOOKS_CONFIG.md), so blocking here is the correct fix,
         not a workaround — bounded by generate_timeout either way.
+
+        prior_summary: the previous chunk's returned summary (same session),
+        for continuity across read_new_turns() pages — see affect.py. This
+        call's own summary is returned so the caller can thread it into the
+        next chunk.
         """
         try:
-            from lib import config as _cfg
-            from lib.generate import get_generate_provider
-            merged = _cfg.load()
-            merged.update(self.store.config)
-            provider = get_generate_provider(merged)
-            if provider is None:
-                _log.debug("distill skipped: no generate provider configured/reachable",
+            lm = self._get_lm()
+            if lm is None:
+                _log.debug("distill skipped: no dspy lm configured/reachable",
                            extra={"session_id": session_id, "project": project_root})
-                return
-            episodes = distill_to_episodes(session_id, context, provider)
+                return ""
+            episodes, summary, frustration = distill_to_episodes(
+                session_id, context, lm, prior_summary=prior_summary,
+            )
+            hot = HotMemoryStore(self.store)
             for ep in episodes:
                 self.writer.save(ep)
+                if ep.category == "preference":
+                    hot.apply_patch("user", ep.content, session_id, project_root)
+                elif ep.category == "correction":
+                    hot.apply_patch("memory", ep.content, session_id, project_root)
+                elif ep.category == "reversal":
+                    # Separate hot file from corrections (ADR-004 Track A):
+                    # a reversal is a settled decision that changed, not a
+                    # this-turn mistake — different kind of fact, was
+                    # incorrectly blended into "memory" before.
+                    hot.apply_patch("reversal", ep.content, session_id, project_root)
+                # "undelivered" stays deliberately out of hot inject — it's
+                # an open item, not yet a settled standing fact.
             if episodes:
-                _log.info("distilled %d episode(s) (%d preferences, %d corrections)",
-                          len(episodes),
-                          sum(1 for e in episodes if e.category == "preference"),
-                          sum(1 for e in episodes if e.category == "correction"),
-                          extra={"session_id": session_id, "project": project_root})
+                _log.info(
+                    "distilled %d episode(s) (%d preferences, %d corrections, "
+                    "%d reversals, %d undelivered)",
+                    len(episodes),
+                    sum(1 for e in episodes if e.category == "preference"),
+                    sum(1 for e in episodes if e.category == "correction"),
+                    sum(1 for e in episodes if e.category == "reversal"),
+                    sum(1 for e in episodes if e.category == "undelivered"),
+                    extra={"session_id": session_id, "project": project_root},
+                )
+            if frustration["present"]:
+                try:
+                    _bus_emit(FrustrationSignal(
+                        session_id=session_id, project=project_root or "-",
+                        intensity=frustration["intensity"],
+                        exit_type=frustration["exit_type"],
+                        profanity_present=frustration["profanity_present"],
+                        # Link to the actual substance extracted from this
+                        # same chunk — see docs/transcript-audit-findings.md
+                        # §5.1's frustration_signal.payload field. Without
+                        # this the signal is a bare mood score with nothing
+                        # for a future reader to act on.
+                        payload_episode_ids=[ep.id for ep in episodes],
+                    ))
+                except Exception:
+                    pass
+            return summary
         except Exception as exc:
             _log.debug("distill failed: %s", exc, extra={"session_id": session_id, "project": project_root})
+            return ""
 
     def ingest_git_log(self, project_root: Path, session_id: str, max_commits: int = 1000) -> Dict[str, Any]:
         """Ingest git commit history as L0 episodes (delta-only after first run).
@@ -275,9 +388,11 @@ class TranscriptService:
     def handle_claude_transcript(self, data: Dict[str, Any], event: str) -> Dict[str, Any]:
         """Handle SessionEnd or PreCompact — capture transcript then cascade consolidation.
 
-        Reads the JSONL transcript, saves last N turns as an L0 conversation
-        episode, then runs the L0->L1->L2->L3 cascade (L2/L3 gated off by
-        default, see lib/consolidate/reflector.py).
+        Reads EVERY turn new since this session's last capture (paginated
+        into chunks, see read_new_turns — not just a trailing window), saves
+        one L0 conversation episode + runs distill per chunk, then runs the
+        L0->L1->L2->L3 cascade (L2/L3 gated off by default, see
+        lib/consolidate/reflector.py).
         """
         session_id = data.get("session_id", "unknown")
         transcript_path = data.get("transcript_path", "")
@@ -289,16 +404,22 @@ class TranscriptService:
         result: Dict[str, Any] = {"event": event, "session_id": session_id}
 
         if transcript_path and Path(transcript_path).exists():
-            context, turn_count = self.read_transcript(Path(transcript_path))
-            if context and turn_count >= 3:
+            episode_ids = []
+            total_turns = 0
+            prior_summary = ""
+            for context, turn_count in self.read_new_turns(Path(transcript_path), session_id):
+                if not context or turn_count < 3:
+                    continue
                 ep = self.conversation_episode(session_id, context, turn_count)
                 self.writer.save(ep)
-                result["conversation_episode"] = ep.id
-                result["turns_captured"] = turn_count
+                episode_ids.append(ep.id)
+                total_turns += turn_count
                 log.info("conversation episode saved: %s turns=%d", ep.id, turn_count)
-                self.run_distill(session_id, context, cwd)
+                prior_summary = self.run_distill(session_id, context, cwd, prior_summary=prior_summary)
+            if episode_ids:
+                result["conversation_episodes"] = episode_ids
+                result["turns_captured"] = total_turns
 
-        from lib.consolidate import MemoryReflector
         reflector = MemoryReflector(self.store)
         consolidation = reflector.consolidate()
         result["consolidation"] = consolidation
@@ -310,7 +431,41 @@ class TranscriptService:
             consolidation.get("l3_created", 0),
         )
 
+        result["instincts_auto"] = self._auto_trigger_instincts(session_id, cwd)
+
         return result
+
+    def _auto_trigger_instincts(self, session_id: str, project_root: str) -> Dict[str, Any]:
+        """Call InstinctEngine.evolve()/promote() — both already implement
+        their own gating (confidence threshold / distinct-project count),
+        they were just never called automatically anywhere. This is that
+        call site, nothing more."""
+        try:
+            ie = InstinctEngine(self.store)
+            evolved_path = ie.evolve()
+            evolved = 1 if evolved_path else 0
+
+            promoted = 0
+            for inst in ie.list_instincts(min_confidence=0.0):
+                try:
+                    if ie.promote(inst.id):
+                        promoted += 1
+                except Exception:
+                    pass
+
+            try:
+                _bus_emit(InstinctAutoTrigger(
+                    session_id=session_id, project=project_root or "-",
+                    evolved=evolved, promoted=promoted,
+                ))
+            except Exception:
+                pass
+
+            return {"evolved": evolved, "promoted": promoted}
+        except Exception as exc:
+            _log.debug("instinct auto-trigger failed: %s", exc,
+                       extra={"session_id": session_id, "project": project_root})
+            return {"evolved": 0, "promoted": 0}
 
     def handle_session_end(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """Handle SessionEnd (internal Crisp Engine format) — checkpoint + cascade."""
@@ -322,7 +477,6 @@ class TranscriptService:
         session_episodes = [ep for ep in all_episodes if ep.session_id == session_id]
         self.create_checkpoint(session_id, session_episodes)
 
-        from lib.consolidate import MemoryReflector
         reflector = MemoryReflector(self.store)
         consolidation = reflector.consolidate()
 

@@ -35,6 +35,8 @@ _ENV_MAP = {
     "CRISP_GENERATE_TOP_P":       "generate_top_p",
     "CRISP_GENERATE_TOP_K":       "generate_top_k",
     "CRISP_GENERATE_TIMEOUT":     "generate_timeout",
+    "CRISP_HOT_MEMORY_CHAR_CAP":  "hot_memory_char_cap",
+    "CRISP_INJECT_CHAR_BUDGET":   "inject_char_budget",
 }
 
 # ── Default global config path ───────────────────────────────────────────────
@@ -127,6 +129,13 @@ def load(
             merged["generate_top_k"] = int(merged["generate_top_k"])
         except (ValueError, TypeError):
             pass
+
+    for key in ("hot_memory_char_cap", "inject_char_budget"):
+        if key in merged:
+            try:
+                merged[key] = int(merged[key])
+            except (ValueError, TypeError):
+                pass
 
     return merged
 

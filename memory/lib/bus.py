@@ -107,6 +107,36 @@ class ContextInjected:
 
 
 @dataclass
+class NarrateResult:
+    """One L1/L2/L3 generation call — whether it used real LLM narrative or
+    fell back to the template. Lets `crisp monitor`/logs show the real vs
+    template ratio instead of that being invisible."""
+    session_id: str
+    project: str
+    layer: int
+    used_llm: bool
+    _event: str = field(default="narrate_result", init=False, repr=False)
+
+
+@dataclass
+class HotMemoryPatched:
+    session_id: str
+    project: str
+    kind: str  # "user" | "memory"
+    char_count: int
+    _event: str = field(default="hot_memory_patched", init=False, repr=False)
+
+
+@dataclass
+class InstinctAutoTrigger:
+    session_id: str
+    project: str
+    evolved: int
+    promoted: int
+    _event: str = field(default="instinct_auto_trigger", init=False, repr=False)
+
+
+@dataclass
 class ReflectRan:
     l0_in: int
     session_id: str = ""
@@ -117,7 +147,32 @@ class ReflectRan:
     _event: str = field(default="reflect_ran", init=False, repr=False)
 
 
-BusEvent = HookFired | WatcherMatched | WatcherSkipped | EpisodeSaved | EmbedResult | ContextInjected | ReflectRan
+@dataclass
+class FrustrationSignal:
+    """One distill chunk's frustration score, LINKED to the substantive
+    episodes extracted from the same chunk via payload_episode_ids — per
+    docs/transcript-audit-findings.md §5.1's frustration_signal.payload
+    field. Without this link the signal is structural/analytics-only and
+    functionally inert (confirmed this session: persisted to the bus DB,
+    never read back by anything) — payload_episode_ids is what lets a
+    future consumer (e.g. reflector.py surfacing recurring frustration
+    exits in L2) actually reach the preference/correction/reversal/
+    undelivered episodes that rode in on this frustration, instead of a
+    bare mood score with nothing to point to."""
+    session_id: str
+    project: str
+    intensity: str  # none | low | med | high | extreme
+    exit_type: str  # none | compact_under_fire | disagreement | delete_threat | session_abandon
+    profanity_present: bool
+    payload_episode_ids: list = field(default_factory=list)
+    _event: str = field(default="frustration_signal", init=False, repr=False)
+
+
+BusEvent = (
+    HookFired | WatcherMatched | WatcherSkipped | EpisodeSaved | EmbedResult
+    | ContextInjected | NarrateResult | HotMemoryPatched | InstinctAutoTrigger
+    | ReflectRan | FrustrationSignal
+)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +210,25 @@ def tail(since_id: int = 0, limit: int = 100) -> list[dict]:
             }
             for r in rows
         ]
+    except Exception:
+        return []
+
+
+def frustration_signals_for_session(session_id: str, limit: int = 50) -> list[dict]:
+    """Real, session-scoped read (not tail()'s since_id scan — the events
+    table already has 10k+ real rows in this project, tail(0, huge_limit)
+    would be a genuine perf problem, not a hypothetical one) — feeds
+    reflector.py's L2 recurring-failure detection (ADR-004 item 4)."""
+    try:
+        con = _reader_con()
+        rows = con.execute(
+            "SELECT id, ts, payload FROM events "
+            "WHERE event = 'frustration_signal' AND session = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+        con.close()
+        return [{"id": r[0], "ts": r[1], **json.loads(r[2])} for r in rows]
     except Exception:
         return []
 

@@ -145,6 +145,7 @@ class IMemoryStore(Protocol):
         session_id: Optional[str] = None,
         since_ts: Optional[str] = None,
         limit: Optional[int] = None,
+        include_embedding: bool = False,
     ) -> List[MemoryEpisode]:
         """Return episodes matching all supplied filters, newest first."""
         ...
@@ -641,6 +642,7 @@ class MemoryStore:
         session_id: Optional[str] = None,
         since_ts: Optional[str] = None,
         limit: Optional[int] = None,
+        include_embedding: bool = False,
     ) -> List[MemoryEpisode]:
         """Return episodes matching all supplied filters, newest first.
 
@@ -650,6 +652,11 @@ class MemoryStore:
         session_id -- restrict to one session
         since_ts   -- ISO 8601 UTC; only episodes with timestamp >= this value
         limit      -- return at most this many episodes (applied after sort)
+        include_embedding -- False by default (the 13s->1s perf fix from
+            this session): parsing the embedding block out of every YAML
+            frontmatter is the expensive part of a list call. Pass True
+            only when the caller actually needs vectors (e.g. similarity
+            clustering) — see MemoryReflector._cluster_l1_by_embedding.
         """
         layers = [layer] if layer is not None else range(4)
         episodes = []
@@ -658,7 +665,7 @@ class MemoryStore:
             if not layer_dir.exists():
                 continue
             for fp in sorted(layer_dir.glob("*.md")):
-                ep = self._parse_file(fp)
+                ep = self._parse_file(fp, include_embedding=include_embedding)
                 if ep is None:
                     continue
                 if category and ep.category != category:
